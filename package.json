@@ -1,7 +1,7 @@
 {
   "name": "opencode-hud",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "description": "Painel desktop (Tauri 2 + React) para acompanhar em tempo real quanto você gasta (e economiza) usando o opencode.",
   "license": "MIT",

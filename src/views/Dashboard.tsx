@@ -144,6 +144,7 @@ export function Dashboard(): React.JSX.Element {
                         fmt={fmt}
                         onJumpToSessions={() => setSection("sessions")}
                         onJumpToModels={() => setSection("models")}
+                        onOpenSettings={() => setSection("settings")}
                       />
                     )}
                     {section === "models" && <ModelsView snapshot={snapshot} fmt={fmt} />}
@@ -151,7 +152,12 @@ export function Dashboard(): React.JSX.Element {
                     {section === "projects" && <ProjectsView snapshot={snapshot} fmt={fmt} />}
                     {section === "sessions" && <SessionsView snapshot={snapshot} fmt={fmt} />}
                     {section === "settings" && (
-                      <SettingsView settings={settings} update={update} />
+                      <SettingsView
+                        settings={settings}
+                        update={update}
+                        snapshot={snapshot}
+                        fmt={fmt}
+                      />
                     )}
                   </motion.div>
                 </AnimatePresence>

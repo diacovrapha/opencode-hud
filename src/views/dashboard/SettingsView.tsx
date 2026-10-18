@@ -1,6 +1,6 @@
 import * as React from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { Github, Info, Wallet, RefreshCw, Power, Globe } from "lucide-react";
+import { Github, Info, Wallet, RefreshCw, Globe, Plug, Settings as SettingsIcon } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -14,26 +14,31 @@ import {
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { MetricTooltip } from "@/components/hud/MetricTooltip";
+import { ProviderBillingHelp, ProviderRow } from "@/components/hud/ProviderRow";
+import { ReferencePicker } from "@/components/hud/ReferencePicker";
+import { CustomPricesEditor } from "@/components/hud/CustomPricesEditor";
+import { EmptyState } from "@/components/hud/EmptyState";
 import { cn } from "@/lib/utils";
-import type { Settings } from "@/lib/data/types";
-
-const REFERENCE_MODELS = [
-  { value: "anthropic/claude-sonnet-5-5", label: "Claude Sonnet 5.5" },
-  { value: "anthropic/claude-opus-5-5", label: "Claude Opus 5.5" },
-  { value: "anthropic/claude-haiku-5-5", label: "Claude Haiku 5.5" },
-];
+import { getProviders, getReference } from "@/lib/ui/v2-bridge";
+import type {
+  Settings as SettingsType,
+  Snapshot,
+} from "@/lib/data/types";
+import type { MoneyFmt } from "@/lib/ui/format";
 
 type Props = {
-  settings: Settings;
-  update: (p: Partial<Settings>) => Promise<void>;
+  settings: SettingsType;
+  update: (p: Partial<SettingsType>) => Promise<void>;
+  snapshot?: Snapshot | null;
+  fmt: MoneyFmt;
 };
 
-export function SettingsView({ settings, update }: Props): React.JSX.Element {
-  const [refModel, setRefModel] = React.useState(settings.referenceModel);
-  React.useEffect(() => {
-    setRefModel(settings.referenceModel);
-  }, [settings.referenceModel]);
-
+export function SettingsView({
+  settings,
+  update,
+  snapshot,
+  fmt,
+}: Props): React.JSX.Element {
   const [budgetDaily, setBudgetDaily] = React.useState(
     settings.budgetDaily !== undefined ? String(settings.budgetDaily) : "",
   );
@@ -71,11 +76,68 @@ export function SettingsView({ settings, update }: Props): React.JSX.Element {
     }
   };
 
-  const knownRef = REFERENCE_MODELS.find((m) => m.value === refModel);
-  const customRef = !knownRef && refModel.trim().length > 0;
+  const providers = getProviders(snapshot);
+  const resolved = getReference(snapshot);
+  const usedKeys = React.useMemo(
+    () => new Set((snapshot?.byModel ?? []).map((b) => b.key)),
+    [snapshot?.byModel],
+  );
+  const missingModels = (snapshot?.byModel ?? []).filter(
+    (b) => (b as { priceMissing?: boolean }).priceMissing === true,
+  );
 
   return (
     <div className="space-y-4">
+      {/* Seus provedores — primeiro da lista, conforme pedido */}
+      <Card className="glass border-white/10 p-5">
+        <div className="mb-3 flex items-center gap-2">
+          <Plug className="h-4 w-4 text-violet-300" />
+          <h3 className="text-sm font-semibold">Seus provedores</h3>
+          <MetricTooltip
+            content={
+              <div className="space-y-1">
+                <div>
+                  Detectamos quem você usa para rodar o opencode. Para cada um,
+                  diga como você paga: a gente separa o <strong>gasto variável
+                  (por token)</strong> das <strong>mensalidades de assinatura</strong>
+                  {" "}no cálculo de economia.
+                </div>
+                <div className="opacity-80">
+                  Provedores como GitHub Copilot, Claude Pro/Max e ChatGPT Plus
+                  aparecem como custo 0 na coluna "real" porque são
+                  assinaturas — mas continuam contando para o "equivalente na
+                  API".
+                </div>
+              </div>
+            }
+          />
+        </div>
+
+        {providers.length === 0 ? (
+          <EmptyState
+            title="Nenhum provedor detectado ainda"
+            description="Use o opencode para gerar dados; os provedores aparecem aqui assim que houver uso."
+            className="bg-transparent"
+          />
+        ) : (
+          <div className="space-y-2">
+            <ProviderBillingHelp />
+            {providers.map((p) => (
+              <ProviderRow
+                key={p.id}
+                provider={p}
+                setting={settings.providers[p.id]}
+                settings={settings}
+                update={update}
+                fmt={fmt}
+                showInferredBadge
+              />
+            ))}
+          </div>
+        )}
+      </Card>
+
+      {/* Orçamento */}
       <Card className="glass border-white/10 p-5">
         <div className="mb-4 flex items-center gap-2">
           <Wallet className="h-4 w-4 text-violet-300" />
@@ -86,7 +148,7 @@ export function SettingsView({ settings, update }: Props): React.JSX.Element {
           <Field label="Moeda" hint="Moeda em que os limites são exibidos.">
             <Select
               value={settings.currency}
-              onValueChange={(v) => update({ currency: v as Settings["currency"] })}
+              onValueChange={(v) => update({ currency: v as SettingsType["currency"] })}
             >
               <SelectTrigger>
                 <SelectValue />
@@ -130,78 +192,51 @@ export function SettingsView({ settings, update }: Props): React.JSX.Element {
         </div>
       </Card>
 
+      {/* Modelo de referência */}
       <Card className="glass border-white/10 p-5">
         <div className="mb-4 flex items-center gap-2">
           <Info className="h-4 w-4 text-blue-300" />
-          <h3 className="text-sm font-semibold">Cálculo de economia</h3>
-          <MetricTooltip content="Modelo usado como referência para calcular quanto você teria gasto na API. A economia é a diferença entre esse custo e o custo real." />
+          <h3 className="text-sm font-semibold">Modelo de referência</h3>
+          <MetricTooltip
+            content={
+              <div className="space-y-1">
+                <div>
+                  O modelo de referência é o "se tudo rodasse nele" usado no
+                  cálculo de economia. Pode ser o do seu agente principal
+                  (detectado automaticamente) ou um que você escolha.
+                </div>
+                <div className="opacity-80">
+                  Se a referência estiver sem preço, a economia vs. referência
+                  fica indisponível até você cadastrar o valor em "Preços
+                  manuais" abaixo.
+                </div>
+              </div>
+            }
+          />
         </div>
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <Field label="Modelo de referência" hint="Usado para calcular quanto custaria se tudo rodasse nesse modelo.">
-            <Select
-              value={knownRef ? knownRef.value : "__custom__"}
-              onValueChange={(v) => {
-                if (v !== "__custom__") {
-                  setRefModel(v);
-                  update({ referenceModel: v });
-                }
-              }}
-            >
-              <SelectTrigger>
-                <SelectValue placeholder="Selecione" />
-              </SelectTrigger>
-              <SelectContent>
-                {REFERENCE_MODELS.map((m) => (
-                  <SelectItem key={m.value} value={m.value}>
-                    {m.label}
-                  </SelectItem>
-                ))}
-                <SelectItem value="__custom__">Personalizado…</SelectItem>
-              </SelectContent>
-            </Select>
-            <div
-              role="group"
-              aria-label="Modelos de referência sugeridos"
-              className="mt-1.5 flex flex-wrap items-center gap-1.5"
-            >
-              <span className="text-[11px] text-muted-foreground">Sugeridos:</span>
-              {REFERENCE_MODELS.map((m) => {
-                const selected = refModel === m.value;
-                return (
-                  <button
-                    key={m.value}
-                    type="button"
-                    aria-pressed={selected}
-                    onClick={() => {
-                      setRefModel(m.value);
-                      void update({ referenceModel: m.value });
-                    }}
-                    className={cn(
-                      "rounded-full border px-2 py-0.5 text-[11px] transition-colors",
-                      selected
-                        ? "border-violet-400/50 bg-violet-500/20 text-violet-100"
-                        : "border-white/10 bg-white/5 text-muted-foreground hover:border-violet-300/40 hover:text-foreground",
-                    )}
-                  >
-                    {m.label}
-                  </button>
-                );
-              })}
-            </div>
-            {(customRef || !knownRef) && (
-              <Input
-                className="mt-2"
-                placeholder="provider/modelo"
-                value={refModel}
-                onChange={(e) => setRefModel(e.target.value)}
-                onBlur={() => {
-                  if (refModel.trim().length > 0) {
-                    update({ referenceModel: refModel.trim() });
-                  }
-                }}
-              />
-            )}
-          </Field>
+        <ReferencePicker
+          settings={settings}
+          resolved={resolved}
+          update={update}
+          fmt={fmt}
+          usedKeys={usedKeys}
+        />
+      </Card>
+
+      {/* Preços manuais (colapsável) */}
+      <CustomPricesEditor
+        settings={settings}
+        update={update}
+        missing={missingModels}
+      />
+
+      {/* Sistema + outras preferências */}
+      <Card className="glass border-white/10 p-5">
+        <div className="mb-4 flex items-center gap-2">
+          <SettingsIcon className="h-4 w-4 text-emerald-300" />
+          <h3 className="text-sm font-semibold">Sistema</h3>
+        </div>
+        <div className="space-y-3">
           <Field
             label="Intervalo de atualização (segundos)"
             hint="Com que frequência os dados do opencode são lidos."
@@ -226,15 +261,7 @@ export function SettingsView({ settings, update }: Props): React.JSX.Element {
               />
             </div>
           </Field>
-        </div>
-      </Card>
-
-      <Card className="glass border-white/10 p-5">
-        <div className="mb-4 flex items-center gap-2">
-          <Power className="h-4 w-4 text-emerald-300" />
-          <h3 className="text-sm font-semibold">Sistema</h3>
-        </div>
-        <div className="space-y-3">
+          <Separator className="bg-white/5" />
           <ToggleRow
             label="Iniciar com o Windows"
             description="Abre o HUD minimizado na bandeja ao fazer login."
@@ -258,7 +285,7 @@ export function SettingsView({ settings, update }: Props): React.JSX.Element {
         </div>
         <div className="text-xs text-muted-foreground">
           <div>
-            Versão: <span className="tabular text-foreground">0.2.0</span>
+            Versão: <span className="tabular text-foreground">{__APP_VERSION__}</span>
           </div>
           <div className="mt-1">
             Repositório:{" "}
@@ -286,7 +313,7 @@ function Field({
   children: React.ReactNode;
 }): React.JSX.Element {
   return (
-    <div className="flex flex-col gap-1.5">
+    <div className={cn("flex flex-col gap-1.5")}>
       <Label className="text-xs text-muted-foreground">{label}</Label>
       {children}
       {hint && <div className="text-[11px] text-muted-foreground/80">{hint}</div>}

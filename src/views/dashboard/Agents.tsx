@@ -12,6 +12,7 @@ import type { Snapshot } from "@/lib/data/types";
 import type { MoneyFmt } from "@/lib/ui/format";
 import { Bot } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { getProviders, providerBillingById } from "@/lib/ui/v2-bridge";
 
 type Props = {
   snapshot: Snapshot;
@@ -38,6 +39,7 @@ export function AgentsView({ snapshot, fmt }: Props): React.JSX.Element {
   const columns = buildBreakdownColumns(fmt, { cost: totalsCost }, {
     includeProvider: false,
     includeModelConfig: false,
+    providerBilling: providerBillingById(getProviders(snapshot)),
   }).map((c) => {
     if (c.key !== "label") return c;
     return {

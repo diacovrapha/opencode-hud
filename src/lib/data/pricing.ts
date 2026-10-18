@@ -7,6 +7,10 @@
 // Para modelos em providers de assinatura (cost = 0), procuramos o mesmo
 // `modelId` em outros providers pay-as-you-go, comparando IDs case-insensitive.
 // Se não acharmos, marcamos o grupo como `priceMissing`.
+//
+// O índice também guarda metadados do PROVEDOR (campo `name` do `models.json`)
+// em `index.providers` (id → ProviderMeta), expostos para o Snapshot.provider
+// label e para a busca do catálogo.
 
 import type { TokenSet } from "./types";
 
@@ -27,7 +31,58 @@ export type ModelEntry = {
   cost: ModelCost;
 };
 
-export type ModelIndex = Map<string, ModelEntry>;
+export type ProviderMeta = {
+  id: string;
+  /** Campo "name" do `models.json`. `null` quando ausente. */
+  name: string | null;
+};
+
+/**
+ * Índice em memória de preços. API compatível com `Map<string, ModelEntry>`
+ * (mesmo `size`/`get`/`has`/iteração) — subclasses foram trocadas por uma
+ * classe enxuta para que `index.providers` (metadados do provedor) viaje junto.
+ */
+export class ModelIndex {
+  readonly #entries: Map<string, ModelEntry>;
+  /** id → ProviderMeta (inclui provedores sem modelos, úteis para o label). */
+  readonly providers: Map<string, ProviderMeta>;
+
+  constructor(
+    entries: Map<string, ModelEntry>,
+    providers: Map<string, ProviderMeta>,
+  ) {
+    this.#entries = entries;
+    this.providers = providers;
+  }
+
+  get size(): number {
+    return this.#entries.size;
+  }
+
+  get(key: string): ModelEntry | undefined {
+    return this.#entries.get(key);
+  }
+
+  has(key: string): boolean {
+    return this.#entries.has(key);
+  }
+
+  values(): IterableIterator<ModelEntry> {
+    return this.#entries.values();
+  }
+
+  keys(): IterableIterator<string> {
+    return this.#entries.keys();
+  }
+
+  entries(): IterableIterator<[string, ModelEntry]> {
+    return this.#entries.entries();
+  }
+
+  [Symbol.iterator](): IterableIterator<[string, ModelEntry]> {
+    return this.#entries.entries();
+  }
+}
 
 /**
  * Mapa de providers de assinatura → lista de providers pay-as-you-go
@@ -56,10 +111,15 @@ export const FALLBACK_PROVIDERS: Record<string, string[]> = {
 /** Faz o parse do `models.json` e devolve um índice enxuto. */
 export function buildModelIndex(rawJson: string): ModelIndex {
   const parsed = JSON.parse(rawJson) as Record<string, unknown>;
-  const idx: ModelIndex = new Map();
+  const entries = new Map<string, ModelEntry>();
+  const providers = new Map<string, ProviderMeta>();
   for (const [providerId, providerVal] of Object.entries(parsed)) {
     if (!providerVal || typeof providerVal !== "object") continue;
-    const models = (providerVal as { models?: Record<string, unknown> }).models;
+    const provObj = providerVal as { models?: Record<string, unknown>; name?: unknown };
+    // Coleta o `name` (legível) do provedor mesmo se ele não tiver modelos.
+    const name = typeof provObj.name === "string" ? provObj.name : null;
+    providers.set(providerId, { id: providerId, name });
+    const models = provObj.models;
     if (!models || typeof models !== "object") continue;
     for (const [modelId, modelVal] of Object.entries(models)) {
       if (!modelVal || typeof modelVal !== "object") continue;
@@ -70,7 +130,7 @@ export function buildModelIndex(rawJson: string): ModelIndex {
       const crNum = numOr(cost.cache_read);
       const cwNum = numOr(cost.cache_write);
       if (inNum === null || outNum === null) continue;
-      idx.set(indexKey(providerId, modelId), {
+      entries.set(indexKey(providerId, modelId), {
         providerId,
         modelId,
         cost: {
@@ -82,7 +142,7 @@ export function buildModelIndex(rawJson: string): ModelIndex {
       });
     }
   }
-  return idx;
+  return new ModelIndex(entries, providers);
 }
 
 function numOr(v: unknown): number | null {

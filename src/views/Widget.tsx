@@ -287,7 +287,15 @@ export function Widget(): React.JSX.Element {
                       Hoje
                     </span>
                   }
-                  content="Custo total das sessões iniciadas hoje. Modelos de assinatura aparecem como R$ 0."
+                  content={
+                    <>
+                      Custo total das sessões iniciadas hoje. Este é o gasto
+                      <strong> variável</strong> (só o que é cobrado por token):
+                      provedores marcados como assinatura ou gratuito/local
+                      aparecem como R$ 0 aqui — suas mensalidades entram em
+                      outro lugar.
+                    </>
+                  }
                 />
                 <div data-tauri-drag-region className="text-2xl font-semibold leading-none">
                   <Money usd={todayCost} fmt={fmt} size="xl" tone="gradient" />

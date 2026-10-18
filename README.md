@@ -3,7 +3,7 @@
 Painel desktop para Windows que mostra em tempo real quanto você gasta (e
 economiza) usando o [opencode](https://opencode.ai).
 
-![version](https://img.shields.io/badge/version-0.2.0-7c3aed?style=flat-square)
+![version](https://img.shields.io/badge/version-0.3.0-7c3aed?style=flat-square)
 ![platform](https://img.shields.io/badge/platform-Windows-0078d4?style=flat-square&logo=windows&logoColor=white)
 ![license](https://img.shields.io/badge/license-MIT-22c55e?style=flat-square)
 ![tauri](https://img.shields.io/badge/Tauri-2-24c8d8?style=flat-square&logo=tauri&logoColor=white)
@@ -13,8 +13,13 @@ economiza) usando o [opencode](https://opencode.ai).
 > read-only to show real-time cost, tokens, sessions, and savings. It bundles
 > a tiny always-on-top widget plus a full dashboard with filters for today,
 > 7/30 days, the current month, and all time, breakdowns by model, agent,
-> project, and a session tree with sub-sessions. Budget alerts fire at 80%
-> and 100% via Windows notifications, USD/BRL rates come from
+> project, and a session tree with sub-sessions. It works with **any provider
+> supported by opencode** — the ones you actually use are detected from the
+> database (names come from the `models.dev` table that opencode ships),
+> and you can tag each one with its **billing type**: pay-as-you-go
+> (`Por token`), subscription with a monthly fee in BRL or USD
+> (`Assinatura`), or free/local (`Gratuito ou local`). Budget alerts fire
+> at 80% and 100% via Windows notifications, USD/BRL rates come from
 > `economia.awesomeapi.com.br`, and the only outbound network calls are the
 > FX rate and an optional `models.dev` lookup. MIT licensed.
 
@@ -38,16 +43,23 @@ visão clara do total gasto nem de quanto a sua assinatura realmente economiza
 em relação ao preço por token de cada modelo. O HUD lê esses mesmos dados
 localmente e mostra três números lado a lado:
 
-- **Gasto real** — o que o opencode efetivamente registrou (em modelos de
-  assinatura, como o MiniMax Coding Plan, costuma aparecer como R$ 0).
-- **Custo equivalente na API** — quanto custaria se você tivesse pago por
-  token, usando o preço pay-as-you-go do mesmo modelo. Para modelos em
-  providers de assinatura, o HUD procura o mesmo `modelId` em providers
+- **Gasto real (variável)** — só o que sai do seu bolso **por token**. É a
+  soma do que o opencode registrou para provedores marcados como `Por token`
+  (pay-as-you-go). **Provedores marcados como `Assinatura` ou `Gratuito ou
+  local` contam 0 aqui**, mesmo que o opencode tenha registrado um custo —
+  é o caso típico de **GitHub Copilot**, **Claude Pro/Max** e **ChatGPT
+  Plus** quando você entra pelo login da conta: o opencode escreve um custo
+  por token que você não paga de verdade.
+- **Custo equivalente na API** — quanto custaria se você tivesse pagado por
+  token em todos os modelos, incluindo os de assinatura. Para modelos em
+  provedores de assinatura, o HUD procura o mesmo `modelId` em provedores
   pay-as-you-go equivalentes (via `FALLBACK_PROVIDERS` em
   `src/lib/data/pricing.ts`).
-- **Economia vs. referência** — diferença entre o custo do seu *modelo de
-  referência* (configurável, padrão Claude Sonnet 5.5) e o custo real dos
-  mesmos tokens.
+- **Suas assinaturas valem a pena?** — para cada assinatura você configura
+  (com mensalidade em R$ ou US$), o card mostra o **múltiplo** entre o
+  equivalente na API do mês e a mensalidade. Ex.: `2,5×` significa que o
+  uso do mês, pago por token, sairia por 2,5 vezes o valor da assinatura
+  — a assinatura se pagou (e sobrou).
 
 ## Recursos
 
@@ -58,11 +70,12 @@ localmente e mostra três números lado a lado:
   barra de tarefas (`skipTaskbar: true`).
 - **Dashboard completo** com filtros para **Hoje**, **7 dias**, **30 dias**,
   **Mês** e **Tudo**, e as seções:
-  - **Visão geral** — KPIs (gasto real, custo equivalente na API, economia
-    vs. referência, tokens), gráfico de gasto diário, distribuição por
-    modelo (donut), calendário de uso (heatmap), top modelos no período,
-    card de hoje com orçamento diário e projeção do mês, e detalhe da
-    sessão atual.
+  - **Visão geral** — KPIs (gasto real variável, custo equivalente na
+    API, economia vs. referência, tokens), gráfico de gasto diário,
+    distribuição por modelo (donut), calendário de uso (heatmap), top
+    modelos no período, card de hoje com orçamento diário e projeção do
+    mês, card "Suas assinaturas valem a pena?" e detalhe da sessão
+    atual.
   - **Modelos** — barras por custo e por tokens, tabela completa com
     provider, tokens, custo, custo equivalente e referência.
   - **Agentes** — mesmas barras e tabela, mais a configuração lida de
@@ -71,9 +84,44 @@ localmente e mostra três números lado a lado:
   - **Sessões** — árvore com sub-sessões (filhos recursivos), detalhe ao
     lado e *breakdown* de tokens. Sub-sessões são somadas na raiz sem
     dupla contagem.
-  - **Configurações** — moeda (BRL/USD), orçamento diário e mensal,
-    modelo de referência, intervalo de polling (s), *autostart* e
+  - **Configurações** — *Seus provedores*, moeda (BRL/USD), orçamento
+    diário e mensal, modelo de referência, preços manuais de modelos sem
+    preço (Avançado), intervalo de polling (s), *autostart* e
     preferência expandida do widget.
+- **Funciona com qualquer provedor do opencode** — Anthropic, OpenAI,
+  Google, OpenRouter, MiniMax, Groq, Ollama, GitHub Copilot, providers
+  locais (LM Studio, llama.cpp)… os **provedores são detectados
+  automaticamente** pelo uso (a partir do `providerID`/`modelID` em cada
+  mensagem gravada pelo opencode) e ganham nome legível a partir da
+  tabela `models.json` que o próprio opencode já mantém (dados de
+  `models.dev`). Não há lista hardcoded: se aparecer um provedor novo
+  no seu uso, ele aparece aqui.
+- **Seus provedores** (aba *Configurações*) — para cada provedor detectado,
+  você diz **como você paga**, com um palpite inicial automático:
+  - **Por token** — pago por uso na API do provedor (entra no gasto
+    variável).
+  - **Assinatura** — você paga uma mensalidade fixa (Copilot, Claude
+    Pro/Max, ChatGPT Plus…). Informe a mensalidade em R$ ou US$ e ela
+    aparece no card "Suas assinaturas valem a pena?".
+  - **Gratuito ou local** — sem custo direto (Ollama, LM Studio,
+    modelos locais).
+  - O palpite vem de regras simples (sufixos `-plan`/`coding-plan`,
+    nomes `ollama`/`lmstudio`/`llama.cpp`, e inspeção do `models.json`)
+    e mostra um selo "palpite automático — confirme" até você confirmar.
+- **Modelo de referência** — pode ser **automático** ou **manual**. No
+  modo automático, o HUD lê o agente principal do opencode a partir de
+  `default_agent` no `opencode.jsonc` (e do frontmatter em `agents/*.md`
+  ou do campo `agent.<nome>.model`); se não achar, usa o `model` global
+  do `opencode.jsonc`; em último caso cai no **modelo mais usado** nos
+  últimos 30 dias (maior custo API-equivalente). No modo manual, você
+  escolhe qualquer modelo através de uma **busca no catálogo inteiro**
+  (todos os modelos do `models.json`, não só os que você já usou).
+- **Preços manuais** (Avançado, em Configurações) — quando um modelo não
+  tem preço na tabela `models.json` (modelos locais muito novos ou
+  provedores pouco populares), a coluna "real" fica zerada e aparece um
+  aviso. Você pode cadastrar um preço manual por 1M de tokens (entrada,
+  saída, cache lido e cache escrito) e a comparação volta a funcionar
+  imediatamente.
 - **Orçamento com alertas do Windows** — ao cruzar **80%** e **100%** do
   limite diário ou mensal, dispara uma notificação nativa. Disparo único
   por limite por dia/mês (estado persistido em `budget-watcher.json`).
@@ -100,6 +148,7 @@ localmente e mostra três números lado a lado:
 | Tela | |
 |---|---|
 | **Visão geral** | ![](docs/screenshots/dashboard-overview.png) |
+| **Seus provedores: como você paga cada um** | ![](docs/screenshots/dashboard-providers.png) |
 | **Modelos** | ![](docs/screenshots/dashboard-models.png) |
 | **Agentes** | ![](docs/screenshots/dashboard-agents.png) |
 | **Sessões** | ![](docs/screenshots/dashboard-sessions.png) |
@@ -109,7 +158,7 @@ localmente e mostra três números lado a lado:
 
 Baixe o instalador na página de
 [Releases](https://github.com/diacovrapha/opencode-hud/releases/latest).
-O artefato recomendado é `opencode-hud_0.2.0_x64-setup.exe` (instalador
+O artefato recomendado é `opencode-hud_0.3.0_x64-setup.exe` (instalador
 NSIS por usuário, em `%LOCALAPPDATA%\opencode HUD`). O `.msi` está
 disponível como alternativa.
 
@@ -145,7 +194,8 @@ guarda em disco:
   o custo no modelo de referência. Parseado uma vez e mantido em índice
   em memória, recarregado a cada 6 h.
 - `%USERPROFILE%\.config\opencode\opencode.jsonc` (ou `.json`) — para
-  identificar o modelo configurado em cada agente.
+  identificar o modelo configurado em cada agente e resolver o modelo de
+  referência no modo automático.
 - `%USERPROFILE%\.config\opencode\agents\*.md` — agentes personalizados.
 
 **As únicas chamadas de rede que o HUD faz** são:
@@ -161,19 +211,51 @@ metadados de sessão que o opencode já grava localmente.
 
 ### Como os números são calculados
 
-- **Custo real** — `SUM(json_extract(m.data, '$.cost'))` por mensagem
-  (`role = 'assistant'`), no fuso local.
-- **Custo equivalente na API** — para cada mensagem, multiplica
-  `tokens.input` por `cost.input / 1e6`, `tokens.output + tokens.reasoning`
-  por `cost.output / 1e6` (raciocínio é cobrado como saída),
-  `tokens.cache.read` por `cost.cache_read / 1e6` e `tokens.cache.write`
-  por `cost.cache_write / 1e6`. Para modelos em providers de assinatura,
-  procura o mesmo `modelId` em providers pay-as-you-go listados em
-  `FALLBACK_PROVIDERS` (ex.: `minimax-coding-plan` → `minimax`/
-  `minimax-cn`/`minimax-cn-coding-plan`). Se não achar, marca o grupo como
-  `priceMissing` e o valor fica zerado.
-- **Referência** — o mesmo cálculo de tokens, mas usando o
-  `referenceModel` configurado (padrão `anthropic/claude-sonnet-5-5`).
+#### Regra de cobrança (por provedor)
+
+O **gasto real variável** (coluna `cost`) é regido pelo tipo de cobrança
+que você marcou para cada provedor em **Configurações → Seus provedores**:
+
+- **Por token** — `cost = custo registrado` se o opencode gravou um valor
+  maior que zero; senão `cost = tokens × preço (entrada/saída/cache)`.
+- **Assinatura** — `cost = 0`. Você paga uma mensalidade fixa; o uso do
+  provedor **não entra** no gasto variável, mesmo que o opencode tenha
+  registrado um custo. A mensalidade entra no card **Suas assinaturas
+  valem a pena?** e o uso entra no custo equivalente na API.
+- **Gratuito ou local** — `cost = 0`. Modelos sem custo direto (Ollama,
+  LM Studio, etc.) não entram no gasto variável, mas continuam contando
+  para o custo equivalente (se houver preço de API conhecido) e para
+  o total de tokens.
+
+O **custo equivalente na API** (coluna `apiEquivalentCost`) é sempre
+`max(registrado, tokens × preço)` — ou seja, mesmo em assinatura ele usa
+o preço *pay-as-you-go* para te mostrar quanto você teria pago se não
+tivesse a assinatura.
+
+#### Prioridade de preços (por modelo)
+
+Para cada par `provider/model`, o preço usado segue a ordem:
+
+1. **Preço manual** que você cadastrou em *Configurações → Preços
+   manuais* (por 1M de tokens, com `input`/`output`/`cacheRead`/
+   `cacheWrite` separados). Tem prioridade máxima e sobrescreve qualquer
+   outra fonte.
+2. **Tabela `models.json` do opencode** (via `findPrice` em
+   `src/lib/data/pricing.ts`). É a tabela que o próprio opencode consome
+   de `models.dev`.
+3. **Fallback pay-as-you-go** para modelos em provedores de assinatura:
+   `models.json` geralmente traz preço 0 nesses casos (ex.: `coding-mini`
+   em `minimax-coding-plan`), então o HUD procura o mesmo `modelId` em
+   provedores pay-as-you-go equivalentes listados em `FALLBACK_PROVIDERS`
+   (ex.: `minimax-coding-plan` → `minimax`). Se encontrar, usa esse preço
+   como o "pay-as-you-go equivalente" e marca o lookup como `fallback`.
+   Se não encontrar nenhum dos três, marca o grupo como `priceMissing` e
+   o valor fica zerado (até você cadastrar um preço manual).
+
+#### Demais regras
+
+- **Referência** — o mesmo cálculo de tokens, mas usando o modelo de
+  referência (automático ou manual; padrão `anthropic/claude-sonnet-5-5`).
 - **"Hoje"** — é o dia local da *mensagem* (`time_created`), não da sessão
   inteira: uma mensagem gravada às 23:50 conta em "hoje" mesmo que a
   sessão tenha sido aberta ontem.
@@ -240,6 +322,10 @@ src/
     real.ts          DataSource que consome o SQLite + models.json
     aggregate.ts     funções puras (breakdowns, daily, session tree)
     pricing.ts       índice de preços + fallback de assinatura → pay-as-you-go
+    providers.ts     billing por provedor, "Seus provedores", catálogo de
+                     assinaturas
+    reference.ts     resolução do modelo de referência (auto/manual)
+    catalog.ts       busca no models.json para "Modelo de referência manual"
     periods.ts       janelas temporais ("hoje", 7d, 30d, mês, tudo)
     settings.ts      persistência de Settings (plugin-store)
     budget.ts        projeção do mês + checagem de limites

@@ -16,6 +16,7 @@ import { KpiCard } from "@/components/hud/KpiCard";
 import { Money } from "@/components/hud/Money";
 import { TokenCount } from "@/components/hud/TokenCount";
 import { MetricTooltip } from "@/components/hud/MetricTooltip";
+import { SubscriptionsCard } from "@/components/hud/SubscriptionsCard";
 import { AreaDaily } from "@/components/hud/charts/AreaDaily";
 import { ModelDonut, TokensDonut } from "@/components/hud/charts/ModelDonut";
 import { CalendarHeatmap } from "@/components/hud/charts/CalendarHeatmap";
@@ -23,8 +24,20 @@ import { BarBreakdown } from "@/components/hud/charts/BarBreakdown";
 import { BudgetBar } from "@/components/hud/BudgetBar";
 import { totalTokens } from "@/lib/ui/format";
 import type { TokenTotals } from "@/lib/ui/format";
-import type { Settings, Snapshot } from "@/lib/data/types";
+import type {
+  ProviderInfo,
+  ResolvedReference,
+  Settings,
+  Snapshot,
+  SubscriptionsSummary,
+} from "@/lib/data/types";
 import type { MoneyFmt } from "@/lib/ui/format";
+import {
+  getProviders,
+  getReference,
+  getSubscriptions,
+  totalMonthlyUsd,
+} from "@/lib/ui/v2-bridge";
 
 type OverviewProps = {
   snapshot: Snapshot;
@@ -32,42 +45,127 @@ type OverviewProps = {
   fmt: MoneyFmt;
   onJumpToSessions: () => void;
   onJumpToModels: () => void;
+  onOpenSettings?: () => void;
 };
 
-const TOOLTIPS = {
-  realCost:
-    "Custo real: o que foi efetivamente cobrado por token pelos provedores. Modelos de assinatura aparecem como R$ 0.",
-  apiEquivalent:
-    "Custo equivalente na API: quanto custaria se você tivesse pagado por token, mesmo em modelos de assinatura.",
-  savings:
-    "Economia: diferença entre o custo do seu modelo de referência (configurado em Configurações) e o custo real que você pagou.",
-  tokens:
-    "Total de tokens processados: entrada, saída, raciocínio, cache lido e cache escrito.",
-  projection:
-    "Projeção do mês: gasto atual multiplicado pelos dias restantes do mês. Útil para planejar o orçamento.",
-  currentSession:
-    "Sessão que está em andamento agora, com agente, modelo e custo até o momento.",
-};
+function buildTooltips(
+  fmt: MoneyFmt,
+  subscriptions: SubscriptionsSummary | null,
+  providers: ProviderInfo[],
+  resolved: ResolvedReference | null,
+  fallbackReferenceModel: string,
+) {
+  const subs = providers.filter((p) => p.billing === "subscription");
+  return {
+    realCost: (
+      <div className="space-y-1">
+        <div>
+          Custo real VARIÁVEL: o que foi efetivamente cobrado por token.
+          Provedores marcados como assinatura ou gratuito/local entram com R$ 0
+          aqui — o que você paga por eles vai em "assinaturas".
+        </div>
+        {subscriptions && subscriptions.monthlyTotalUsd > 0 && (
+          <div className="opacity-80">
+            Assinaturas somam{" "}
+            <strong>
+              <Money
+                usd={subscriptions.monthlyTotalUsd}
+                fmt={fmt}
+                size="xs"
+                hideSecondary
+              />
+            </strong>
+            /mês à parte.
+          </div>
+        )}
+      </div>
+    ),
+    apiEquivalent: subs.length === 0 ? (
+      <div className="space-y-1">
+        <div>
+          Quanto custaria se você tivesse pagado por token, mesmo em
+          modelos de assinatura (o cálculo usa o preço de API de cada
+          modelo).
+        </div>
+        <div className="opacity-80">
+          Como você não tem assinaturas cadastradas, equivalente ≈ real
+          (você paga tudo por token).
+        </div>
+      </div>
+    ) : (
+      <div className="space-y-1">
+        <div>
+          Quanto custaria se você tivesse pagado por token, mesmo em modelos
+          de assinatura (o cálculo usa o preço de API de cada modelo).
+        </div>
+        <div className="opacity-80">
+          Inclui o uso de {subs.map((s) => s.label).join(", ")} — se uma
+          assinatura te poupar, a diferença aparece aqui.
+        </div>
+      </div>
+    ),
+    savings: (
+      <div className="space-y-1">
+        <div>
+          Diferença entre o que o modelo de referência custaria para o mesmo
+          uso e o que você pagou de fato.
+        </div>
+        <div className="opacity-80">
+          Referência:{" "}
+          <strong>
+            {resolved
+              ? `${resolved.label} (${resolved.mode === "auto" ? "automático" : "manual"})`
+              : fallbackReferenceModel}
+          </strong>
+          {resolved?.source && <> — origem: {resolved.source}</>}
+          {resolved?.priceMissing && (
+            <span className="text-amber-300"> (sem preço)</span>
+          )}
+        </div>
+      </div>
+    ),
+    tokens:
+      "Total de tokens processados: entrada, saída, raciocínio, cache lido e cache escrito.",
+    projection:
+      "Projeção do mês: gasto atual multiplicado pelos dias restantes do mês. Útil para planejar o orçamento.",
+    currentSession:
+      "Sessão que está em andamento agora, com agente, modelo e custo até o momento.",
+  };
+}
 
 /**
- * Diferença apiEquivalent − real, formatada em frase humana.
- * - Positiva (assinatura poupou): "o MiniMax (assinatura) te poupou R$ X".
- * - ≈ 0: "sem diferença entre assinatura e API".
- * - Negativa: cai na frase neutra.
+ * Texto dinâmico para o KPI "Custo equivalente na API" — usa os nomes dos
+ * provedores de assinatura vindos dos dados, sem nunca escrever nome fixo.
  */
 function apiEquivalentSentence(
   apiEquivalent: number,
   real: number,
+  providers: ProviderInfo[],
+  sub: SubscriptionsSummary | null,
   fmt: MoneyFmt,
 ): React.ReactNode {
   const diff = apiEquivalent - real;
   if (!Number.isFinite(diff) || Math.abs(diff) < 0.005) {
+    if ((sub?.items ?? []).length === 0) {
+      return <>você paga tudo por token: equivalente = real.</>;
+    }
     return <>sem diferença entre custo real e o da API.</>;
+  }
+  const subs = providers.filter((p) => p.billing === "subscription");
+  if (diff > 0 && subs.length > 0) {
+    const names = subs.map((s) => s.label).join(", ");
+    return (
+      <>
+        suas assinaturas ({names}) te pouparam{" "}
+        <Money usd={diff} fmt={fmt} size="xs" hideSecondary /> vs. se você
+        tivesse pago por token.
+      </>
+    );
   }
   if (diff > 0) {
     return (
       <>
-        o MiniMax (assinatura) te poupou{" "}
+        você economizou{" "}
         <Money usd={diff} fmt={fmt} size="xs" hideSecondary /> vs. se tivesse
         pago por token.
       </>
@@ -87,13 +185,20 @@ function savingsSentence(
   reference: number,
   real: number,
   fmt: MoneyFmt,
-  referenceModel: string,
+  ref: ResolvedReference | null,
 ): React.ReactNode {
+  if (!ref) {
+    return <>referência ainda não foi resolvida.</>;
+  }
+  if (ref.priceMissing) {
+    return <>referência sem preço: defina em Configurações.</>;
+  }
+  const label = ref.label;
   const diff = reference - real;
   if (!Number.isFinite(diff) || Math.abs(diff) < 0.005) {
     return (
       <>
-        se tudo rodasse em <span className="text-foreground">{referenceModel}</span>:
+        se tudo rodasse em <span className="text-foreground">{label}</span>:
         sem diferença.
       </>
     );
@@ -101,8 +206,7 @@ function savingsSentence(
   if (diff > 0) {
     return (
       <>
-        se tudo rodasse em{" "}
-        <span className="text-foreground">{referenceModel}</span>:{" "}
+        se tudo rodasse em <span className="text-foreground">{label}</span>:{" "}
         <Money usd={reference} fmt={fmt} size="xs" hideSecondary />.
       </>
     );
@@ -110,7 +214,7 @@ function savingsSentence(
   return (
     <>
       o modelo de referência (
-      <span className="text-foreground">{referenceModel}</span>) custaria{" "}
+      <span className="text-foreground">{label}</span>) custaria{" "}
       <Money usd={Math.abs(diff)} fmt={fmt} size="xs" hideSecondary /> a menos.
     </>
   );
@@ -122,12 +226,22 @@ export function Overview({
   fmt,
   onJumpToSessions,
   onJumpToModels,
+  onOpenSettings,
 }: OverviewProps): React.JSX.Element {
   const [chartMode, setChartMode] = React.useState<"money" | "tokens">("money");
   const [donutMode, setDonutMode] = React.useState<"money" | "tokens">("money");
   const totals = snapshot.totals;
   const today = snapshot.today;
 
+  const providers = getProviders(snapshot);
+  const subscriptions = getSubscriptions(snapshot);
+  const resolved = getReference(snapshot);
+  const monthlySubUsd = totalMonthlyUsd(subscriptions);
+  const showSubscriptionsLine = monthlySubUsd > 0;
+
+  // "Gasto real variável" — soma dos modelos marcados como api (cost > 0).
+  // A semântica já está correta em `totals.cost`; o realCostTooltipLabel
+  // apenas adiciona a linha de assinaturas.
   const totalTokensCount = React.useMemo(() => totalTokens(totals.tokens), [totals]);
   const todayTokensCount = React.useMemo(() => totalTokens(today.tokens), [today]);
   const savings = Math.max(totals.referenceCost - totals.cost, 0);
@@ -137,11 +251,19 @@ export function Overview({
   const dailyLimitCurrency = settings.currency;
   const dailyLimitUsd = convertToUsd(dailyLimit, dailyLimitCurrency, fmt);
 
+  const TOOLTIPS = buildTooltips(
+    fmt,
+    subscriptions,
+    providers,
+    resolved,
+    settings.referenceModel,
+  );
+
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <KpiCard
-          label="Gasto real"
+          label="Gasto real (variável)"
           tooltip={TOOLTIPS.realCost}
           icon={<Coins className="h-4 w-4" />}
           accent="violet"
@@ -154,9 +276,24 @@ export function Overview({
             />
           }
           context={
-            <span>
-              {totals.sessions} sessões · {totals.messages} mensagens
-            </span>
+            <div className="flex flex-col gap-0.5">
+              <span>
+                {totals.sessions} sessões · {totals.messages} mensagens
+              </span>
+              {showSubscriptionsLine && (
+                <span className="text-muted-foreground">
+                  + assinaturas:{" "}
+                  <Money
+                    usd={monthlySubUsd}
+                    fmt={fmt}
+                    size="xs"
+                    hideSecondary
+                    tone="muted"
+                  />
+                  /mês
+                </span>
+              )}
+            </div>
           }
         />
         <KpiCard
@@ -176,6 +313,8 @@ export function Overview({
               {apiEquivalentSentence(
                 totals.apiEquivalentCost,
                 totals.cost,
+                providers,
+                subscriptions,
                 fmt,
               )}
             </span>
@@ -183,30 +322,29 @@ export function Overview({
         />
         <KpiCard
           label="Economia vs. referência"
-          tooltip={
-            <div>
-              {TOOLTIPS.savings}{" "}
-              <div className="mt-1 opacity-70">
-                Modelo de referência: {settings.referenceModel}
-              </div>
-            </div>
-          }
+          tooltip={TOOLTIPS.savings}
           icon={<TrendingDown className="h-4 w-4" />}
           accent="success"
           value={
-            <Money
-              usd={savings}
-              fmt={fmt}
-              size="lg"
-              tone="success"
-            />
+            resolved?.priceMissing ? (
+              <span className="text-base text-amber-300">
+                sem preço: defina em Configurações
+              </span>
+            ) : (
+              <Money
+                usd={savings}
+                fmt={fmt}
+                size="lg"
+                tone="success"
+              />
+            )
           }
           context={
             savingsSentence(
               totals.referenceCost,
               totals.cost,
               fmt,
-              settings.referenceModel,
+              resolved,
             )
           }
         />
@@ -235,6 +373,14 @@ export function Overview({
           }
         />
       </div>
+
+      {(subscriptions?.items ?? []).length > 0 && (
+        <SubscriptionsCard
+          summary={subscriptions!}
+          fmt={fmt}
+          onOpenSettings={onOpenSettings}
+        />
+      )}
 
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
         <Card className="glass border-white/10 p-4 lg:col-span-2">
@@ -385,8 +531,7 @@ export function Overview({
                 href="#/settings"
                 onClick={(e) => {
                   e.preventDefault();
-                  // Settings ficam no dashboard; o usuário clica pelo botão "Abrir dashboard" no widget.
-                  // Em vite dev, não há navegação — silenciosamente no-op.
+                  onOpenSettings?.();
                 }}
                 className="mt-1 inline-block text-[11px] text-violet-300 underline-offset-2 hover:underline"
               >

@@ -1,6 +1,12 @@
 // Funções puras de agregação a partir das linhas do SQL.
 // Recebe uma lista de "linhas de agregação" e produz os Breakdowns /
 // DailyPoints / Sessions / Totals.
+//
+// A partir da v2, o `cost` das linhas passa a refletir o GASTO VARIÁVEL
+// após aplicar a tabela de cobrança (assinatura = 0). O custo original
+// do opencode fica em `recordedCost`. Para ativar, basta passar um
+// `BillingContext` como último parâmetro. Sem `ctx`, o comportamento é
+// o legacy: `cost = r.cost` (útil para testes existentes).
 
 import type {
   Aggregate,
@@ -21,6 +27,8 @@ import {
   priceTokens,
   splitModelKey,
 } from "./pricing";
+import type { BillingContext } from "./providers";
+import { rowBillableCost } from "./providers";
 
 // ----- Tipos de linha -----
 
@@ -58,6 +66,7 @@ export function addAggregate(a: Aggregate, b: Aggregate): Aggregate {
     cost: a.cost + b.cost,
     apiEquivalentCost: a.apiEquivalentCost + b.apiEquivalentCost,
     referenceCost: a.referenceCost + b.referenceCost,
+    recordedCost: (a.recordedCost ?? 0) + (b.recordedCost ?? 0),
     tokens: {
       input: a.tokens.input + b.tokens.input,
       output: a.tokens.output + b.tokens.output,
@@ -221,19 +230,36 @@ export function buildBreakdowns(
   rows: AggRow[],
   models: ModelIndex,
   referenceModel: string,
+  ctx?: BillingContext | null,
 ): { byModel: Breakdown[]; byAgent: Breakdown[]; byProject: Breakdown[] } {
   const refLookup = lookupRef(models, referenceModel);
-  const modelMap = new Map<string, { label: string; cost: number; api: number; ref: number; tokens: TokenSet; msgs: number; sessionIds: Set<string>; priceMissing: boolean }>();
-  const agentMap = new Map<string, { label: string; cost: number; api: number; ref: number; tokens: TokenSet; msgs: number; sessionIds: Set<string>; priceMissing: boolean }>();
-  const projMap = new Map<string, { label: string; path: string; cost: number; api: number; ref: number; tokens: TokenSet; msgs: number; sessionIds: Set<string>; priceMissing: boolean }>();
+  const modelMap = new Map<string, AccRow>();
+  const agentMap = new Map<string, AccRow>();
+  const projMap = new Map<string, AccRow & { path?: string }>();
 
   for (const r of rows) {
     const lookup = findPrice(models, r.providerId, r.modelId);
-    const apiCost = lookup.via === "missing"
-      ? 0
-      : priceTokens(lookup.entry.cost, r.tokens);
-    const refCost = priceWithLookup(refLookup, r.tokens);
-    const priceMissing = lookup.via === "missing";
+    const refCost = ctx
+      ? rowBillableCost(r, ctx).ref
+      : priceWithLookup(refLookup, r.tokens);
+    let apiCost: number;
+    let cost: number;
+    let recorded: number;
+    let priceMissing: boolean;
+    if (ctx) {
+      const c = rowBillableCost(r, ctx);
+      cost = c.cost;
+      apiCost = c.api;
+      recorded = c.recorded;
+      priceMissing = c.priceMissing;
+    } else {
+      apiCost = lookup.via === "missing"
+        ? 0
+        : priceTokens(lookup.entry.cost, r.tokens);
+      cost = r.cost;
+      recorded = r.cost;
+      priceMissing = lookup.via === "missing";
+    }
 
     // byModel: chave = "provider/modelId" canônico. Quando há fallback, usamos
     // o ID do fallback para a chave ficar estável.
@@ -243,16 +269,18 @@ export function buildBreakdowns(
     const modelLabel = (lookup.via === "fallback")
       ? `${lookup.entry.providerId}/${lookup.entry.modelId}`
       : modelKey;
-    accumulateGroup(modelMap, modelKey, modelLabel, r, apiCost, refCost, priceMissing);
+    accumulateGroup(modelMap, modelKey, modelLabel, r, cost, apiCost, refCost, recorded, priceMissing);
 
-    accumulateGroup(agentMap, r.agent, r.agent || "(sem agente)", r, apiCost, refCost, priceMissing);
+    accumulateGroup(agentMap, r.agent, r.agent || "(sem agente)", r, cost, apiCost, refCost, recorded, priceMissing);
     accumulateGroup(
       projMap,
       r.directory,
       labelOfDir(r.directory),
       r,
+      cost,
       apiCost,
       refCost,
+      recorded,
       priceMissing,
       { path: r.directory },
     );
@@ -283,12 +311,14 @@ function labelOfDir(d: string): string {
 }
 
 function accumulateGroup(
-  map: Map<string, { label: string; cost: number; api: number; ref: number; tokens: TokenSet; msgs: number; sessionIds: Set<string>; priceMissing: boolean }>,
+  map: Map<string, AccRow>,
   key: string,
   label: string,
   r: AggRow,
+  cost: number,
   api: number,
   ref: number,
+  recorded: number,
   priceMissing: boolean,
   extra?: { path: string },
 ): void {
@@ -299,6 +329,7 @@ function accumulateGroup(
       cost: 0,
       api: 0,
       ref: 0,
+      recorded: 0,
       tokens: emptyTokens(),
       msgs: 0,
       sessionIds: new Set<string>(),
@@ -306,10 +337,11 @@ function accumulateGroup(
     };
     map.set(key, g);
   }
-  if (extra) (g as { path?: string }).path = extra.path;
-  g.cost += r.cost;
+  if (extra) g.path = extra.path;
+  g.cost += cost;
   g.api += api;
   g.ref += ref;
+  g.recorded += recorded;
   g.tokens = {
     input: g.tokens.input + r.tokens.input,
     output: g.tokens.output + r.tokens.output,
@@ -322,11 +354,12 @@ function accumulateGroup(
   if (priceMissing) g.priceMissing = true;
 }
 
-type FinalInput = {
+type AccRow = {
   label: string;
   cost: number;
   api: number;
   ref: number;
+  recorded: number;
   tokens: TokenSet;
   msgs: number;
   sessionIds: Set<string>;
@@ -335,9 +368,9 @@ type FinalInput = {
 };
 
 function finalize(
-  map: Map<string, FinalInput>,
-  labelOf: (v: FinalInput) => string,
-  pathOf?: (v: FinalInput) => string | undefined,
+  map: Map<string, AccRow>,
+  labelOf: (v: AccRow) => string,
+  pathOf?: (v: AccRow) => string | undefined,
 ): Breakdown[] {
   const out: Breakdown[] = [];
   for (const [key, v] of map) {
@@ -348,6 +381,7 @@ function finalize(
         cost: v.cost,
         apiEquivalentCost: v.api,
         referenceCost: v.ref,
+        recordedCost: v.recorded,
         tokens: v.tokens,
         messages: v.msgs,
         sessions: v.sessionIds.size,
@@ -375,11 +409,12 @@ export function buildDaily(
   referenceModel: string,
   periodKey: import("./types").PeriodKey,
   now: Date = new Date(),
+  ctx?: BillingContext | null,
 ): DailyPoint[] {
   const days = listDailyDays(periodKey, now);
   const refLookup = lookupRef(models, referenceModel);
   const dayMap = new Map<string, {
-    cost: number; api: number; ref: number;
+    cost: number; api: number; ref: number; recorded: number;
     tokens: TokenSet; msgs: number; sessionIds: Set<string>;
   }>();
   for (const d of days) dayMap.set(dayKey(d), blankDay());
@@ -387,12 +422,19 @@ export function buildDaily(
   for (const r of rows) {
     const bucket = dayMap.get(r.date);
     if (!bucket) continue;
-    const lookup = findPrice(models, r.providerId, r.modelId);
-    const api = lookup.via === "missing" ? 0 : priceTokens(lookup.entry.cost, r.tokens);
-    const ref = priceWithLookup(refLookup, r.tokens);
-    bucket.cost += r.cost;
-    bucket.api += api;
-    bucket.ref += ref;
+    if (ctx) {
+      const c = rowBillableCost(r, ctx);
+      bucket.cost += c.cost;
+      bucket.api += c.api;
+      bucket.ref += c.ref;
+      bucket.recorded += c.recorded;
+    } else {
+      const lookup = findPrice(models, r.providerId, r.modelId);
+      bucket.cost += r.cost;
+      bucket.api += lookup.via === "missing" ? 0 : priceTokens(lookup.entry.cost, r.tokens);
+      bucket.ref += priceWithLookup(refLookup, r.tokens);
+      bucket.recorded += r.cost;
+    }
     bucket.tokens.input += r.tokens.input;
     bucket.tokens.output += r.tokens.output;
     bucket.tokens.reasoning += r.tokens.reasoning;
@@ -411,6 +453,7 @@ export function buildDaily(
         cost: b.cost,
         apiEquivalentCost: b.api,
         referenceCost: b.ref,
+        recordedCost: b.recorded,
         tokens: b.tokens,
         messages: b.msgs,
         sessions: b.sessionIds.size,
@@ -420,10 +463,10 @@ export function buildDaily(
 }
 
 function blankDay(): {
-  cost: number; api: number; ref: number;
+  cost: number; api: number; ref: number; recorded: number;
   tokens: TokenSet; msgs: number; sessionIds: Set<string>;
 } {
-  return { cost: 0, api: 0, ref: 0, tokens: emptyTokens(), msgs: 0, sessionIds: new Set<string>() };
+  return { cost: 0, api: 0, ref: 0, recorded: 0, tokens: emptyTokens(), msgs: 0, sessionIds: new Set<string>() };
 }
 
 // ----- Helpers para Snapshot -----
@@ -432,16 +475,41 @@ function blankDay(): {
  * Soma as linhas em um único Aggregate JÁ PRECIFICADO (custo equivalente na
  * API e custo no modelo de referência), com sessões distintas. Use para
  * `totals` e `today`: somar Aggregates "crus" deixava esses campos em zero.
+ *
+ * Quando `ctx` é passado, aplica a tabela de cobrança (assinatura = 0 etc.)
+ * e preenche `recordedCost`. Sem `ctx`, o comportamento é o legacy (cost = r.cost).
  */
-export function totalAggregate(rows: AggRow[], models: ModelIndex, referenceModel: string): Aggregate {
+export function totalAggregate(
+  rows: AggRow[],
+  models: ModelIndex,
+  referenceModel: string,
+  ctx?: BillingContext | null,
+): Aggregate {
   const refLookup = lookupRef(models, referenceModel);
   const acc = emptyAggregate();
   const sessionIds = new Set<string>();
   for (const r of rows) {
-    const lookup = findPrice(models, r.providerId, r.modelId);
-    acc.cost += r.cost;
-    acc.apiEquivalentCost += lookup.via === "missing" ? 0 : priceTokens(lookup.entry.cost, r.tokens);
-    acc.referenceCost += priceWithLookup(refLookup, r.tokens);
+    let cost = 0;
+    let api = 0;
+    let recorded = 0;
+    let ref = 0;
+    if (ctx) {
+      const c = rowBillableCost(r, ctx);
+      cost = c.cost;
+      api = c.api;
+      recorded = c.recorded;
+      ref = c.ref;
+    } else {
+      const lookup = findPrice(models, r.providerId, r.modelId);
+      cost = r.cost;
+      recorded = r.cost;
+      api = lookup.via === "missing" ? 0 : priceTokens(lookup.entry.cost, r.tokens);
+      ref = priceWithLookup(refLookup, r.tokens);
+    }
+    acc.cost += cost;
+    acc.apiEquivalentCost += api;
+    acc.recordedCost = (acc.recordedCost ?? 0) + recorded;
+    acc.referenceCost += ref;
     acc.tokens.input += r.tokens.input;
     acc.tokens.output += r.tokens.output;
     acc.tokens.reasoning += r.tokens.reasoning;
@@ -454,18 +522,33 @@ export function totalAggregate(rows: AggRow[], models: ModelIndex, referenceMode
   return acc;
 }
 
-/** Custo equivalente na API e no modelo de referência de um conjunto de tokens. */
+/**
+ * Calcula (cost, apiEquivalent, reference, recorded, priceMissing) de UM
+ * conjunto de tokens em UM (provider, model). Usado pelo `real.ts` para
+ * preencher `selfAggregate` de cada sessão; aceita `ctx` para aplicar a
+ * tabela de cobrança.
+ */
 export function priceFor(
   models: ModelIndex,
   referenceModel: string,
   providerId: string,
   modelId: string,
   tokens: TokenSet,
-): { api: number; ref: number } {
+  recordedCost: number,
+  ctx?: BillingContext | null,
+): { cost: number; api: number; ref: number; recorded: number; priceMissing: boolean } {
+  const refLookup = lookupRef(models, referenceModel);
+  const stubRow = { providerId, modelId, tokens, cost: recordedCost };
+  if (ctx) {
+    return rowBillableCost(stubRow, ctx);
+  }
   const lookup = findPrice(models, providerId, modelId);
   return {
+    cost: recordedCost,
     api: lookup.via === "missing" ? 0 : priceTokens(lookup.entry.cost, tokens),
-    ref: priceWithLookup(lookupRef(models, referenceModel), tokens),
+    ref: priceWithLookup(refLookup, tokens),
+    recorded: recordedCost,
+    priceMissing: lookup.via === "missing",
   };
 }
 

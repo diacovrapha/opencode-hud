@@ -2,7 +2,7 @@ import * as React from "react";
 import { ArrowDown, ArrowUp, ArrowUpDown } from "lucide-react";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import type { Breakdown } from "@/lib/data/types";
+import type { BillingType, Breakdown } from "@/lib/data/types";
 import { Money } from "./Money";
 import { TokenCount } from "./TokenCount";
 import { Badge } from "@/components/ui/badge";
@@ -160,7 +160,13 @@ type BreakdownRow = Breakdown & {
 export function buildBreakdownColumns(
   fmt: MoneyFmt,
   totals: { cost: number },
-  opts: { includeProvider?: boolean; includeModelConfig?: boolean; agentsConfig?: ReadonlyArray<{ name: string; model: string }> } = {},
+  opts: {
+    includeProvider?: boolean;
+    includeModelConfig?: boolean;
+    agentsConfig?: ReadonlyArray<{ name: string; model: string }>;
+    /** Mapa providerId → billing efetivo (vindo de `snapshot.providers`). */
+    providerBilling?: Record<string, BillingType>;
+  } = {},
 ): ColumnDef<BreakdownRow>[] {
   const cols: ColumnDef<BreakdownRow>[] = [
     {
@@ -178,16 +184,11 @@ export function buildBreakdownColumns(
               {r.label}
             </TooltipContent>
           </Tooltip>
-          {isSubscription(r.key) && (
-            <Badge variant="secondary" className="bg-violet-500/20 text-violet-200">
-              assinatura
-            </Badge>
-          )}
-          {r.priceMissing && (
-            <Badge variant="outline" className="border-amber-400/40 text-amber-300">
-              sem preço
-            </Badge>
-          )}
+          <ModelBillingBadge
+            rowKey={r.key}
+            priceMissing={r.priceMissing}
+            providerBilling={opts.providerBilling}
+          />
         </div>
       ),
       width: "minmax(0, 2.5fr)",
@@ -343,6 +344,40 @@ export function buildBreakdownColumns(
   return cols;
 }
 
-function isSubscription(model: string): boolean {
-  return model.startsWith("minimax-coding-plan");
+function ModelBillingBadge({
+  rowKey,
+  priceMissing,
+  providerBilling,
+}: {
+  rowKey: string;
+  priceMissing?: boolean;
+  providerBilling?: Record<string, BillingType>;
+}): React.JSX.Element | null {
+  if (priceMissing) {
+    return (
+      <Badge variant="outline" className="border-amber-400/40 text-amber-300">
+        sem preço
+      </Badge>
+    );
+  }
+  const providerId = rowKey.split("/")[0] ?? "";
+  const billing = providerBilling?.[providerId];
+  if (billing === "subscription") {
+    return (
+      <Badge variant="secondary" className="bg-violet-500/20 text-violet-200">
+        assinatura
+      </Badge>
+    );
+  }
+  if (billing === "free") {
+    return (
+      <Badge
+        variant="outline"
+        className="border-emerald-400/40 bg-emerald-500/10 text-emerald-300"
+      >
+        gratuito/local
+      </Badge>
+    );
+  }
+  return null;
 }

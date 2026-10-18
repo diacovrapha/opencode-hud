@@ -11,6 +11,7 @@ import { formatTokens, totalTokens } from "@/lib/ui/format";
 import type { Snapshot } from "@/lib/data/types";
 import type { MoneyFmt } from "@/lib/ui/format";
 import { Cpu } from "lucide-react";
+import { getProviders, providerBillingById } from "@/lib/ui/v2-bridge";
 
 type Props = {
   snapshot: Snapshot;
@@ -37,6 +38,7 @@ export function ModelsView({ snapshot, fmt }: Props): React.JSX.Element {
 
   const columns = buildBreakdownColumns(fmt, { cost: totalsCost }, {
     includeProvider: true,
+    providerBilling: providerBillingById(getProviders(snapshot)),
   });
 
   return (

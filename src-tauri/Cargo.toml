@@ -1,6 +1,6 @@
 [package]
 name = "opencode-hud"
-version = "0.2.0"
+version = "0.3.0"
 description = "opencode HUD"
 authors = ["diacovrapha"]
 edition = "2021"
