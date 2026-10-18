@@ -9,6 +9,7 @@ import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip
 import { EmptyState } from "@/components/hud/EmptyState";
 import type { Snapshot } from "@/lib/data/types";
 import type { MoneyFmt } from "@/lib/ui/format";
+import { getProviders, providerBillingById } from "@/lib/ui/v2-bridge";
 
 type Props = {
   snapshot: Snapshot;
@@ -30,7 +31,9 @@ export function ProjectsView({ snapshot, fmt }: Props): React.JSX.Element {
   }
 
   // Adapta colunas: a primeira coluna mostra label curto + tooltip com path completo.
-  const columns = buildBreakdownColumns(fmt, { cost: totalsCost }).map((c) => {
+  const columns = buildBreakdownColumns(fmt, { cost: totalsCost }, {
+    providerBilling: providerBillingById(getProviders(snapshot)),
+  }).map((c) => {
     if (c.key !== "label") return c;
     return {
       ...c,

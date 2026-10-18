@@ -7,6 +7,7 @@ import {
   stopPolling,
 } from "@/lib/data";
 import { useSettings } from "@/lib/ui/settings-bridge";
+import { getNeedsOnboarding } from "@/lib/ui/v2-bridge";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -20,6 +21,7 @@ import { AgentsView } from "@/views/dashboard/Agents";
 import { ProjectsView } from "@/views/dashboard/Projects";
 import { SessionsView } from "@/views/dashboard/Sessions";
 import { SettingsView } from "@/views/dashboard/SettingsView";
+import { Onboarding } from "@/views/Onboarding";
 import type { PeriodKey } from "@/lib/data/types";
 
 export function Dashboard(): React.JSX.Element {
@@ -53,6 +55,8 @@ export function Dashboard(): React.JSX.Element {
     usdBrlRate: snapshot?.usdBrl?.rate ?? null,
     rateUpdatedAt: snapshot?.usdBrl?.updatedAt,
   };
+
+  const needsOnboarding = !settings.onboardingDone || getNeedsOnboarding(snapshot);
 
   return (
     <div className="flex h-full flex-col bg-transparent text-foreground">
@@ -144,6 +148,7 @@ export function Dashboard(): React.JSX.Element {
                         fmt={fmt}
                         onJumpToSessions={() => setSection("sessions")}
                         onJumpToModels={() => setSection("models")}
+                        onOpenSettings={() => setSection("settings")}
                       />
                     )}
                     {section === "models" && <ModelsView snapshot={snapshot} fmt={fmt} />}
@@ -151,7 +156,12 @@ export function Dashboard(): React.JSX.Element {
                     {section === "projects" && <ProjectsView snapshot={snapshot} fmt={fmt} />}
                     {section === "sessions" && <SessionsView snapshot={snapshot} fmt={fmt} />}
                     {section === "settings" && (
-                      <SettingsView settings={settings} update={update} />
+                      <SettingsView
+                        settings={settings}
+                        update={update}
+                        snapshot={snapshot}
+                        fmt={fmt}
+                      />
                     )}
                   </motion.div>
                 </AnimatePresence>
@@ -160,6 +170,16 @@ export function Dashboard(): React.JSX.Element {
           </ScrollArea>
         </main>
       </div>
+
+      {/* Onboarding — overlay em cima do dashboard */}
+      {snapshot && needsOnboarding && (
+        <Onboarding
+          snapshot={snapshot}
+          settings={settings}
+          update={update}
+          fmt={fmt}
+        />
+      )}
     </div>
   );
 }

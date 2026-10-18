@@ -25,6 +25,7 @@ import type {
   SessionInfo,
   Settings,
   Snapshot,
+  SubscriptionsSummary,
   UsdBrlRate,
 } from "./types";
 import {
@@ -43,19 +44,26 @@ import {
   normalizeDir,
   rowToAggRow,
   rowsForToday,
-  sumAggregates,
   type AggRow,
   type SessionRawRow,
 } from "./aggregate";
 import {
   MODELS_RELOAD_MS,
   buildModelIndex,
-  type ModelIndex,
+  ModelIndex,
 } from "./pricing";
 import { extractAgentsConfig } from "./agents";
 import { fetchUsdBrl } from "./usdbrl";
 import { loadSettings } from "./settings";
 import { monthProjection } from "./budget";
+import {
+  buildProvidersList,
+  computeBillingContext,
+  type BillingContext,
+  rowBillableCost,
+} from "./providers";
+import { resolveReference } from "./reference";
+import { _setCatalogSource } from "./catalog";
 import { DEFAULT_SETTINGS } from "./types";
 
 const HISTORY_TTL_MS = 5 * 60 * 1000;
@@ -125,17 +133,19 @@ class ModelsCache {
         this.idx = buildModelIndex(this.raw);
         this.fetchedAt = Date.now();
       } catch {
-        if (!this.idx) this.idx = new Map();
+        if (!this.idx) this.idx = null;
       }
-    } else if (!this.idx) {
-      this.idx = new Map();
     }
-    return this.idx;
+    return this.idx ?? new ModelIndex(new Map(), new Map());
   }
   setRaw(raw: string | null): void {
     this.raw = raw;
     this.idx = null;
     this.fetchedAt = 0;
+  }
+  /** Devolve o índice atual (ou `null` se nunca carregado) — usado pelo catálogo. */
+  peek(): ModelIndex | null {
+    return this.idx;
   }
 }
 
@@ -154,6 +164,8 @@ export class RealDataSource implements DataSource {
   };
   private lastPeriod: PeriodKey | null = null;
   private referenceModel: string = DEFAULT_SETTINGS.referenceModel;
+  /** BillingContext mais recente — reusado em `fetchSessionSelfAggregates`. */
+  private _lastBillingCtx: BillingContext | null = null;
 
   async getSnapshot(period: PeriodKey): Promise<Snapshot> {
     if (this.lastPeriod !== period) {
@@ -252,30 +264,18 @@ export class RealDataSource implements DataSource {
     // atividade ou descendentes no período).
     const periodRoots = this.filterRootsByPeriod(currentSession.roots, period);
 
-    // 9) Build breakdowns / daily / totals
-    const models = this.models.get();
-    const referenceModel = settings.referenceModel;
-
-    let breakdowns = { byModel: [] as Breakdown[], byAgent: [] as Breakdown[], byProject: [] as Breakdown[] };
-    let daily: DailyPoint[] = [];
-    try {
-      breakdowns = buildBreakdowns(filtered, models, referenceModel);
-      daily = buildDaily(filtered, models, referenceModel, period);
-    } catch (e) {
-      // eslint-disable-next-line no-console
-      console.error("[RealDataSource] buildBreakdowns/buildDaily falhou:", e);
-    }
-    const byModel: Breakdown[] = breakdowns.byModel;
-    const byAgent: Breakdown[] = breakdowns.byAgent;
-    const byProject: Breakdown[] = breakdowns.byProject;
-
-    const totalsAgg = totalAggregate(filtered, models, referenceModel);
-    const todayAgg = totalAggregate(rowsForToday(combinedRows), models, referenceModel);
-
-    // 10) agentsConfig + opencodeRunning
+    // 9) agentsConfig + opencode.jsonc (necessários para a referência AUTO)
     let agentsConfig: AgentConfig[] = [];
+    let agentsJson = "{}";
+    let configJson = "";
     try {
-      agentsConfig = await this.loadAgentsConfig();
+      const [a, c] = await Promise.all([
+        readOpencodeFile("agents").catch(() => "{}"),
+        readOpencodeFile("config").catch(() => ""),
+      ]);
+      agentsJson = a;
+      configJson = c;
+      agentsConfig = extractAgentsConfig(agentsJson, configJson);
     } catch (e) {
       // eslint-disable-next-line no-console
       console.warn("[RealDataSource] loadAgentsConfig falhou:", e);
@@ -287,15 +287,80 @@ export class RealDataSource implements DataSource {
       return false;
     });
 
-    // 11) Projection (mês corrente em USD)
+    // 10) Modelo de referência RESOLVIDO. Em modo "manual" usa `referenceModel`
+    // cru do settings; em modo "auto" consulta `default_agent` etc. O resultado
+    // entra no `BillingContext` para ser usado nos preços de referência.
+    const reference = resolveReference({
+      mode: settings.referenceMode,
+      manualModel: settings.referenceModel,
+      agentsJson,
+      configJson,
+      agentsConfig,
+      rows: combinedRows,
+      models: this.models.peek() ?? new ModelIndex(new Map(), new Map()),
+      now: new Date(),
+    });
+    // Cache local só para `fetchSessionSelfAggregates` usar a referência atual.
+    this.referenceModel = reference.model || DEFAULT_SETTINGS.referenceModel;
+
+    // 11) BillingContext pré-computado UMA vez por snapshot (não por linha).
+    const models = this.models.get();
+    const billingCtx = computeBillingContext({
+      rows: combinedRows,
+      models,
+      settings,
+      referenceModel: this.referenceModel,
+    });
+    this._lastBillingCtx = billingCtx;
+    // Registra o índice no catálogo para a busca via Settings usar o índice já
+    // carregado pelo data source (sem reler models.json a cada query).
+    this.registerCatalogSource();
+
+    // 12) Build breakdowns / daily / totals AGORA COM BILLING APLICADA.
+    let breakdowns = { byModel: [] as Breakdown[], byAgent: [] as Breakdown[], byProject: [] as Breakdown[] };
+    let daily: DailyPoint[] = [];
+    try {
+      breakdowns = buildBreakdowns(filtered, models, this.referenceModel, billingCtx);
+      daily = buildDaily(filtered, models, this.referenceModel, period, new Date(), billingCtx);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error("[RealDataSource] buildBreakdowns/buildDaily falhou:", e);
+    }
+    const byModel: Breakdown[] = breakdowns.byModel;
+    const byAgent: Breakdown[] = breakdowns.byAgent;
+    const byProject: Breakdown[] = breakdowns.byProject;
+
+    const totalsAgg = totalAggregate(filtered, models, this.referenceModel, billingCtx);
+    const todayAgg = totalAggregate(rowsForToday(combinedRows), models, this.referenceModel, billingCtx);
+
+    // 13) Projeção do mês (somente o GASTO VARIÁVEL do mês corrente).
     let projection = { monthCost: 0 };
     try {
       const monthRows = await this.rowsForCurrentMonth();
-      const monthAgg = sumAggregates(monthRows.map((r) => toAggAggregate(r)));
+      // monthProjection consome o `cost` JÁ COM BILLING APLICADA.
+      const monthAgg = aggregateRowsBare(monthRows, billingCtx);
       projection = { monthCost: monthProjection(monthAgg.cost) };
     } catch (e) {
       // eslint-disable-next-line no-console
       console.warn("[RealDataSource] rowsForCurrentMonth falhou:", e);
+    }
+
+    // 14) Provedores detectados + assinaturas.
+    let providers: import("./types").ProviderInfo[] = [];
+    let subscriptions: SubscriptionsSummary = { monthlyTotalUsd: 0, apiEquivalentMonthUsd: 0, items: [] };
+    try {
+      const monthRows = await this.rowsForCurrentMonth();
+      providers = buildProvidersList({
+        rows: combinedRows,
+        monthRows,
+        models,
+        ctx: billingCtx,
+        usdBrlRate: usdBrl?.rate ?? null,
+      });
+      subscriptions = buildSubscriptionsSummary(providers);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn("[RealDataSource] buildProvidersList falhou:", e);
     }
 
     return {
@@ -318,6 +383,10 @@ export class RealDataSource implements DataSource {
         monthly: settings.budgetMonthly,
       },
       projection,
+      providers,
+      subscriptions,
+      reference,
+      needsOnboarding: !settings.onboardingDone,
     };
   }
 
@@ -349,8 +418,74 @@ export class RealDataSource implements DataSource {
         monthly: settings.budgetMonthly,
       },
       projection: { monthCost: 0 },
+      providers: [],
+      subscriptions: { monthlyTotalUsd: 0, apiEquivalentMonthUsd: 0, items: [] },
+      reference: {
+        model: settings.referenceModel,
+        label: settings.referenceModel.split("/").pop() ?? settings.referenceModel,
+        mode: settings.referenceMode,
+        priceMissing: true,
+      },
+      needsOnboarding: !settings.onboardingDone,
       error,
     };
+  }
+
+  /**
+   * Registra o índice do `models.json` e o conjunto de chaves usadas como
+   * "fonte" para `searchCatalog` (em `catalog.ts`). Chamado uma vez por
+   * snapshot — basta passar a referência; o catálogo só consome quando a UI
+   * precisar.
+   */
+  private registerCatalogSource(): void {
+    const idx = this.models.peek();
+    if (!idx || idx.size === 0) {
+      _setCatalogSource(null);
+      return;
+    }
+    _setCatalogSource({
+      getModels: () => this.models.peek(),
+      getUsedKeys: async () => {
+        // Cache simples: guarda o Set entre chamadas.
+        if (this._usedKeysCache && Date.now() - this._usedKeysCache.fetchedAt < 5 * 60 * 1000) {
+          return this._usedKeysCache.keys;
+        }
+        const allRows = await this.fetchAllKnownProviderModelKeys();
+        const keys = new Set<string>();
+        for (const k of allRows) keys.add(k);
+        this._usedKeysCache = { keys, fetchedAt: Date.now() };
+        return keys;
+      },
+    });
+  }
+
+  private _usedKeysCache: { keys: Set<string>; fetchedAt: number } | null = null;
+
+  /**
+   * Devolve `provider/model` distintos já vistos em qualquer mensagem
+   * (não cacheado por período). Implementação: GROUP BY no SQLite.
+   */
+  private async fetchAllKnownProviderModelKeys(): Promise<string[]> {
+    try {
+      const rows = await dbQuery(
+        `SELECT DISTINCT
+          json_extract(m.data, '$.providerID') AS provider_id,
+          json_extract(m.data, '$.modelID') AS model_id
+         FROM message m
+         WHERE json_extract(m.data, '$.role') = 'assistant'
+           AND json_extract(m.data, '$.providerID') IS NOT NULL
+           AND json_extract(m.data, '$.modelID') IS NOT NULL`,
+      );
+      const out: string[] = [];
+      for (const r of asRows(rows)) {
+        const pid = str(r["provider_id"]);
+        const mid = str(r["model_id"]);
+        if (pid && mid) out.push(`${pid}/${mid}`);
+      }
+      return out;
+    } catch {
+      return [];
+    }
   }
 
   private async fetchUsdBrl(): Promise<UsdBrlRate | null> {
@@ -373,14 +508,6 @@ export class RealDataSource implements DataSource {
     } catch {
       // mantém cache anterior (vazio)
     }
-  }
-
-  private async loadAgentsConfig(): Promise<AgentConfig[]> {
-    const [agents, config] = await Promise.all([
-      readOpencodeFile("agents").catch(() => "{}"),
-      readOpencodeFile("config").catch(() => ""),
-    ]);
-    return extractAgentsConfig(agents, config);
   }
 
   /**
@@ -505,6 +632,11 @@ export class RealDataSource implements DataSource {
       const rows = await dbQuery(sql, chunk);
       const models = this.models.get();
       const referenceModel = this.referenceModel;
+      // ctx é construído aqui para a sessão (mesma definição do snapshot).
+      // Não usamos o billingCtx do snapshot porque ele pode ter sido cacheado
+      // — em vez disso, recalculamos de forma rápida pois a inferência de
+      // billing depende das settings e do models.json (ambos estáveis).
+      const ctx: BillingContext | null | undefined = this._lastBillingCtx;
       // Uma linha por (sessão, provider, modelo): precificamos cada uma e somamos.
       for (const r of asRows(rows)) {
         const id = str(r["session_id"]);
@@ -515,11 +647,21 @@ export class RealDataSource implements DataSource {
           cacheRead: num(r["tokens_cache_read"]),
           cacheWrite: num(r["tokens_cache_write"]),
         };
-        const price = priceFor(models, referenceModel, str(r["provider_id"]), str(r["model_id"]), tokens);
+        const recordedCost = num(r["cost"]);
+        const price = priceFor(
+          models,
+          referenceModel,
+          str(r["provider_id"]),
+          str(r["model_id"]),
+          tokens,
+          recordedCost,
+          ctx,
+        );
         const part: Aggregate = {
-          cost: num(r["cost"]),
+          cost: price.cost,
           apiEquivalentCost: price.api,
           referenceCost: price.ref,
+          recordedCost: price.recorded,
           tokens,
           messages: num(r["messages"]),
           sessions: 1,
@@ -544,15 +686,70 @@ export class RealDataSource implements DataSource {
 
 // ----- Helpers -----
 
-function toAggAggregate(r: AggRow): Aggregate {
-  return {
-    cost: r.cost,
-    apiEquivalentCost: 0, // preenchido por buildBreakdowns/buildDaily
-    referenceCost: 0,
-    tokens: r.tokens,
-    messages: r.messages,
-    sessions: r.sessions.size,
+/** Helper local: `aggregateRows` reaproveitado para a projeção do mês. */
+function aggregateRowsBare(rows: AggRow[], ctx: BillingContext): Aggregate {
+  let cost = 0;
+  let api = 0;
+  let ref = 0;
+  let recorded = 0;
+  let messages = 0;
+  const tokens = {
+    input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0,
   };
+  let priceMissing = false;
+  const sessionIds = new Set<string>();
+  for (const r of rows) {
+    const c = rowBillableCost(r, ctx);
+    cost += c.cost;
+    api += c.api;
+    ref += c.ref;
+    recorded += c.recorded;
+    messages += r.messages;
+    tokens.input += r.tokens.input;
+    tokens.output += r.tokens.output;
+    tokens.reasoning += r.tokens.reasoning;
+    tokens.cacheRead += r.tokens.cacheRead;
+    tokens.cacheWrite += r.tokens.cacheWrite;
+    for (const sid of r.sessions) sessionIds.add(sid);
+    if (c.priceMissing) priceMissing = true;
+  }
+  return {
+    cost, apiEquivalentCost: api, referenceCost: ref, recordedCost: recorded,
+    tokens, messages, sessions: sessionIds.size, priceMissing,
+  } as Aggregate;
+}
+
+/**
+ * Resumo de assinaturas: pega só provedores com `billing === "subscription"`
+ * que tiveram uso no mês OU mensalidade definida, e calcula `multiple` (quanto
+ * o uso vale em pay-as-you-go ÷ mensalidade).
+ */
+function buildSubscriptionsSummary(providers: import("./types").ProviderInfo[]): SubscriptionsSummary {
+  const items: import("./types").SubscriptionValue[] = [];
+  let monthlyTotalUsd = 0;
+  let apiEquivalentMonthUsd = 0;
+  for (const p of providers) {
+    if (p.billing !== "subscription") continue;
+    const hasUsage = (p.monthAggregate.messages ?? 0) > 0 ||
+      (p.monthAggregate.tokens.input ?? 0) > 0 ||
+      (p.monthAggregate.tokens.output ?? 0) > 0 ||
+      (p.monthAggregate.tokens.reasoning ?? 0) > 0;
+    const hasFee = p.monthlyFeeUsd !== undefined;
+    if (!hasUsage && !hasFee) continue;
+    const item: import("./types").SubscriptionValue = {
+      providerId: p.id,
+      label: p.label,
+      monthlyFeeUsd: p.monthlyFeeUsd,
+      apiEquivalentMonthUsd: p.monthAggregate.apiEquivalentCost ?? 0,
+    };
+    if (p.monthlyFeeUsd !== undefined && p.monthlyFeeUsd > 0) {
+      item.multiple = item.apiEquivalentMonthUsd / p.monthlyFeeUsd;
+      monthlyTotalUsd += p.monthlyFeeUsd;
+    }
+    apiEquivalentMonthUsd += item.apiEquivalentMonthUsd;
+    items.push(item);
+  }
+  return { monthlyTotalUsd, apiEquivalentMonthUsd, items };
 }
 
 function pickCurrentSessionRoot(

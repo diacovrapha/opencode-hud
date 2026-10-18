@@ -4,11 +4,18 @@ import type {
   Breakdown,
   DailyPoint,
   PeriodKey,
+  ProviderInfo,
   SessionInfo,
   Snapshot,
+  SubscriptionsSummary,
   TokenSet,
 } from "./types";
 import type { DataSource, DbRow } from "./api";
+import { inferBilling } from "./providers";
+import {
+  buildModelIndex,
+  ModelIndex,
+} from "./pricing";
 
 // ---------- helpers ----------
 
@@ -16,42 +23,12 @@ function emptyTokens(): TokenSet {
   return { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 };
 }
 
-function makeAggregate(
-  input: number,
-  output: number,
-  cost: number,
-  messages = 0,
-  sessions = 0,
-  reasoning = 0,
-  cacheRead = 0,
-  cacheWrite = 0,
-): Aggregate {
-  const tokens: TokenSet = {
-    input,
-    output,
-    reasoning,
-    cacheRead,
-    cacheWrite,
-  };
-  // Para uso o conjunto: o custo de referência (Sonnet 5.5) é aproximadamente
-  // 3.75x o custo médio aqui (heurística para o mock).
-  const apiEquivalent = cost * 0.55;
-  const reference = cost * 1.4;
-  return {
-    cost,
-    apiEquivalentCost: apiEquivalent,
-    referenceCost: reference,
-    tokens,
-    messages,
-    sessions,
-  };
-}
-
 function addAggregate(a: Aggregate, b: Aggregate): Aggregate {
   return {
     cost: a.cost + b.cost,
     apiEquivalentCost: a.apiEquivalentCost + b.apiEquivalentCost,
     referenceCost: a.referenceCost + b.referenceCost,
+    recordedCost: (a.recordedCost ?? 0) + (b.recordedCost ?? 0),
     tokens: {
       input: a.tokens.input + b.tokens.input,
       output: a.tokens.output + b.tokens.output,
@@ -82,14 +59,20 @@ type ModelInfo = {
   label: string;
   inputPerM: number;
   outputPerM: number;
+  /** "api" se o opencode registra custo token-based; "subscription"/"free" caso contrário. */
+  billing: "api" | "subscription" | "free";
+  /** Mensalidade (USD) quando assinatura. */
+  monthlyFeeUsd?: number;
 };
 
 const MODELS: ModelInfo[] = [
-  { id: "anthropic/claude-sonnet-5-5", label: "Claude Sonnet 5.5", inputPerM: 3, outputPerM: 15 },
-  { id: "anthropic/claude-haiku-4-5", label: "Claude Haiku 4.5", inputPerM: 0.8, outputPerM: 4 },
-  { id: "anthropic/claude-opus-4-7", label: "Claude Opus 4.7", inputPerM: 15, outputPerM: 75 },
-  { id: "minimax-coding-plan/coding-mini", label: "Coding Mini", inputPerM: 0.4, outputPerM: 2 },
-  { id: "minimax-coding-plan/coding-pro", label: "Coding Pro", inputPerM: 1, outputPerM: 5 },
+  { id: "anthropic/claude-sonnet-5-5", label: "Claude Sonnet 5.5", inputPerM: 3, outputPerM: 15, billing: "api" },
+  { id: "anthropic/claude-haiku-4-5", label: "Claude Haiku 4.5", inputPerM: 0.8, outputPerM: 4, billing: "api" },
+  { id: "anthropic/claude-opus-4-7", label: "Claude Opus 4.7", inputPerM: 15, outputPerM: 75, billing: "api" },
+  { id: "minimax-coding-plan/coding-mini", label: "Coding Mini", inputPerM: 0.4, outputPerM: 2, billing: "subscription", monthlyFeeUsd: 14 },
+  { id: "minimax-coding-plan/coding-pro", label: "Coding Pro", inputPerM: 1, outputPerM: 5, billing: "subscription", monthlyFeeUsd: 14 },
+  { id: "github-copilot/gpt-4o", label: "Copilot GPT-4o", inputPerM: 2.5, outputPerM: 10, billing: "subscription" },
+  { id: "ollama/llama3.2", label: "Llama 3.2 (local)", inputPerM: 0, outputPerM: 0, billing: "free" },
 ];
 
 function modelById(id: string): ModelInfo {
@@ -100,6 +83,41 @@ function modelCost(id: string, input: number, output: number): number {
   const m = modelById(id);
   return (input / 1_000_000) * m.inputPerM + (output / 1_000_000) * m.outputPerM;
 }
+
+/**
+ * Fixture mínima do `models.json` que reproduz as regras de billing que
+ * usamos no `real.ts`: o minimax-coding-plan tem custo 0 mas com fallback
+ * pay-as-you-go (mesmo comportamento do `pricing.ts`).
+ */
+const MOCK_MODELS_JSON = JSON.stringify({
+  anthropic: {
+    name: "Anthropic",
+    models: {
+      "claude-sonnet-5-5": { cost: { input: 3, output: 15 } },
+      "claude-haiku-4-5": { cost: { input: 0.8, output: 4 } },
+      "claude-opus-4-7": { cost: { input: 15, output: 75 } },
+    },
+  },
+  minimax: {
+    name: "MiniMax",
+    models: {
+      "coding-mini": { cost: { input: 0.4, output: 2 } },
+      "coding-pro": { cost: { input: 1, output: 5 } },
+    },
+  },
+  "minimax-coding-plan": {
+    name: "MiniMax Coding Plan",
+    models: {
+      "coding-mini": { cost: { input: 0, output: 0 } },
+      "coding-pro": { cost: { input: 0, output: 0 } },
+    },
+  },
+  ollama: {
+    name: "Ollama (local)",
+    models: { "llama3.2": { cost: { input: 0, output: 0 } } },
+  },
+});
+const MOCK_MODEL_INDEX: ModelIndex = buildModelIndex(MOCK_MODELS_JSON);
 
 // ---------- mock sessions ----------
 
@@ -146,10 +164,31 @@ function buildSessions(): RawSession[] {
   const rnd = pseudoRandom(42);
   const sessions: RawSession[] = [];
 
+  // Pesos para sortear modelos com providers mistos (anthropic api, subscription
+  // MiniMax/Copilot, Ollama local). O índice dos MODELS define a ordem.
+  const weighted: Array<{ id: string; w: number }> = [
+    { id: "anthropic/claude-sonnet-5-5", w: 4 },
+    { id: "anthropic/claude-haiku-4-5", w: 3 },
+    { id: "anthropic/claude-opus-4-7", w: 1 },
+    { id: "minimax-coding-plan/coding-mini", w: 4 },
+    { id: "minimax-coding-plan/coding-pro", w: 2 },
+    { id: "github-copilot/gpt-4o", w: 3 },
+    { id: "ollama/llama3.2", w: 1 },
+  ];
+  const totalWeight = weighted.reduce((s, x) => s + x.w, 0);
+  const pickWeighted = (): string => {
+    let r = rnd() * totalWeight;
+    for (const w of weighted) {
+      r -= w.w;
+      if (r <= 0) return w.id;
+    }
+    return weighted[0]!.id;
+  };
+
   // 15 sessões espalhadas pelos últimos 30 dias.
   for (let i = 0; i < 15; i++) {
     const agent = AGENTS[Math.floor(rnd() * AGENTS.length)];
-    const model = MODELS[Math.floor(rnd() * MODELS.length)].id;
+    const model = pickWeighted();
     const project = PROJECTS[Math.floor(rnd() * PROJECTS.length)];
     const start = Math.floor(rnd() * 30);
     const dur = 5 + Math.floor(rnd() * 90);
@@ -178,7 +217,7 @@ function buildSessions(): RawSession[] {
       id: `s_child_${idx}`,
       title: `Sub-tarefa: ${p.title}`,
       agent: p.agent === "chefe" ? "pleno" : p.agent === "pleno" ? "junior" : "qa",
-      model: "minimax-coding-plan/coding-mini",
+      model: pickWeighted(),
       directory: p.directory,
       parentId: p.id,
       startOffsetDays: p.startOffsetDays,
@@ -213,15 +252,74 @@ function titleFor(_agent: string, i: number): string {
   return `${themes[i % themes.length]} (#${i + 1})`;
 }
 
+/**
+ * Aggregate de UMA sessão mock. Aplica as REGRAS DE BILLING da v2 para que
+ * `cost` (variável) bata com o que o real.ts produziria:
+ *
+ * - `recordedCost` = `tokens × price` (o que o opencode registrou).
+ * - `cost`         = `recordedCost` se billing = "api"; senão 0.
+ * - `apiEquivalent` = `recordedCost` se > 0; senão `tokens × price`
+ *                   com fallback (minimax-coding-plan → minimax).
+ * - `referenceCost` = `tokens × preço do modelo de referência` (Sonnet 5.5).
+ */
 function aggregateFor(s: RawSession): Aggregate {
-  const cost = modelCost(s.model, s.inputTokens, s.outputTokens);
-  return makeAggregate(
-    s.inputTokens,
-    s.outputTokens,
-    cost,
-    s.messages,
-    1,
-  );
+  const tokens: TokenSet = {
+    input: s.inputTokens,
+    output: s.outputTokens,
+    reasoning: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+  };
+  const recorded = modelCost(s.model, s.inputTokens, s.outputTokens);
+  const billing = modelById(s.model).billing;
+  const variable = billing === "api" ? recorded : 0;
+  const lookup = lookupModelForMock(s.model);
+  const apiEquivalent = recorded > 0
+    ? recorded
+    : (lookup ? priceTokensFor(lookup.cost, tokens) : 0);
+  const reference = computeReferenceCost(tokens);
+  return {
+    cost: variable,
+    recordedCost: recorded,
+    apiEquivalentCost: apiEquivalent,
+    referenceCost: reference,
+    tokens,
+    messages: s.messages,
+    sessions: 1,
+  } as Aggregate;
+}
+
+/** Resolve `(provider, modelId)` no índice mock, com fallback para assinatura. */
+function lookupModelForMock(qualified: string): { cost: { input: number; output: number; cacheRead: number; cacheWrite: number } } | null {
+  const [providerId, modelId = ""] = qualified.split("/");
+  const direct = MOCK_MODEL_INDEX.get(`${providerId}\u0000${modelId}`);
+  if (direct && (direct.cost.input > 0 || direct.cost.output > 0)) {
+    return direct;
+  }
+  if (providerId === "minimax-coding-plan") {
+    const fb = MOCK_MODEL_INDEX.get(`minimax\u0000${modelId}`);
+    if (fb) return fb;
+  }
+  if (providerId === "github-copilot") {
+    // Para o mock, caímos no openai genérico (mesma lógica de fallback).
+    const fb = MOCK_MODEL_INDEX.get(`openai\u0000${modelId}`);
+    if (fb) return fb;
+  }
+  return direct ?? null;
+}
+
+function priceTokensFor(
+  cost: { input: number; output: number; cacheRead: number; cacheWrite: number },
+  tokens: TokenSet,
+): number {
+  return (tokens.input / 1_000_000) * cost.input +
+    (tokens.output / 1_000_000) * cost.output;
+}
+
+function computeReferenceCost(tokens: TokenSet): number {
+  const direct = MOCK_MODEL_INDEX.get("anthropic\u0000claude-sonnet-5-5");
+  if (!direct) return 0;
+  return priceTokensFor(direct.cost, tokens);
 }
 
 // ---------- build tree ----------
@@ -405,10 +503,16 @@ export class MockDataSource implements DataSource {
         | "subagent",
     }));
 
+    // ---- v2: provedores, assinaturas, referência, onboarding ----
+    const usdBrlRate = 5.32;
+    const providers = buildMockProviders(all, filtered, agentsConfig, usdBrlRate);
+    const subscriptions = buildMockSubscriptions(providers);
+    const reference = buildMockReference(all);
+
     return {
       generatedAt: new Date().toISOString(),
       opencodeRunning: true,
-      usdBrl: { rate: 5.32, updatedAt: new Date().toISOString() },
+      usdBrl: { rate: usdBrlRate, updatedAt: new Date().toISOString() },
       period,
       totals,
       today: todayAgg,
@@ -421,8 +525,140 @@ export class MockDataSource implements DataSource {
       agentsConfig,
       budget: { currency: "BRL", daily: 50, monthly: 800 },
       projection: { monthCost: todayAgg.cost * 18 },
+      providers,
+      subscriptions,
+      reference,
+      needsOnboarding: false,
     };
   }
+}
+
+// ---------- helpers v2 (mock-only) ----------
+
+function buildMockReference(
+  all: SessionInfo[],
+): import("./types").ResolvedReference {
+  // Modo AUTO: o agente "chefe" existe em agentsConfig → pegamos o primeiro
+  // model dele, ou caímos no modelo mais usado.
+  for (const s of all) {
+    if (s.agent === "chefe") {
+      return {
+        model: s.model,
+        label: s.model.split("/").pop() ?? s.model,
+        mode: "auto",
+        source: "agente principal: chefe",
+        priceMissing: false,
+      };
+    }
+  }
+  return {
+    model: REFERENCE_MODEL_VALUE,
+    label: "claude-sonnet-5-5",
+    mode: "auto",
+    source: "modelo padrão do opencode",
+    priceMissing: false,
+  };
+}
+
+const REFERENCE_MODEL_VALUE = "anthropic/claude-sonnet-5-5";
+
+function buildMockProviders(
+  all: SessionInfo[],
+  filtered: SessionInfo[],
+  _agentsConfig: AgentConfigLike[],
+  usdBrlRate: number,
+): ProviderInfo[] {
+  // Agrupa por providerId e constrói ProviderInfo.
+  const byProvider = new Map<string, { monthAgg: Aggregate; allAgg: Aggregate; models: Set<string>; lastUsed: number }>();
+  const now = Date.now();
+  const monthStart = new Date();
+  monthStart.setDate(1);
+  monthStart.setHours(0, 0, 0, 0);
+  const monthStartMs = monthStart.getTime();
+  for (const s of all) {
+    const pid = s.providerId;
+    if (!pid) continue;
+    const cur = byProvider.get(pid) ?? {
+      monthAgg: emptyAggregate(),
+      allAgg: emptyAggregate(),
+      models: new Set<string>(),
+      lastUsed: 0,
+    };
+    cur.allAgg = addAggregate(cur.allAgg, s.aggregate);
+    if (s.timeCreated >= monthStartMs) {
+      cur.monthAgg = addAggregate(cur.monthAgg, s.aggregate);
+    }
+    cur.models.add(s.model.split("/").pop() ?? s.model);
+    if (s.timeUpdated > cur.lastUsed) cur.lastUsed = s.timeUpdated;
+    cur.lastUsed = Math.max(cur.lastUsed, now);
+    byProvider.set(pid, cur);
+  }
+  // Filtramos providers sem uso no período selecionado? Não: ProviderInfo
+  // também lista provedores "vistos no histórico". Usamos `filtered` apenas
+  // para a UI poder mostrar "0 no período" — mas o tipo é mensal aqui.
+  void filtered;
+  const out: ProviderInfo[] = [];
+  for (const [pid, v] of byProvider) {
+    const providerMeta = MOCK_MODEL_INDEX.providers.get(pid);
+    const label = providerMeta?.name ?? pid;
+    const billing = inferBilling(pid, MOCK_MODEL_INDEX);
+    const monthlyFeeUsd = inferMockMonthlyFee(pid, usdBrlRate);
+    out.push({
+      id: pid,
+      label,
+      billing,
+      inferred: true, // mock: nenhum provider configurado pelo user
+      monthlyFeeUsd,
+      models: [...v.models].sort(),
+      monthAggregate: v.monthAgg,
+      allTimeAggregate: v.allAgg,
+      lastUsed: v.lastUsed,
+    });
+  }
+  out.sort((a, b) => b.lastUsed - a.lastUsed);
+  return out;
+}
+
+type AgentConfigLike = { name: string; model: string };
+
+function inferMockMonthlyFee(providerId: string, _usdBrlRate: number): number | undefined {
+  switch (providerId) {
+    case "minimax-coding-plan":
+      return 14;
+    case "github-copilot":
+      return undefined;
+    case "ollama":
+      return undefined;
+    default:
+      return undefined;
+  }
+}
+
+function buildMockSubscriptions(providers: ProviderInfo[]): SubscriptionsSummary {
+  const items: import("./types").SubscriptionValue[] = [];
+  let monthlyTotalUsd = 0;
+  let apiEquivalentMonthUsd = 0;
+  for (const p of providers) {
+    if (p.billing !== "subscription") continue;
+    const hasUsage =
+      (p.monthAggregate.messages ?? 0) > 0 ||
+      (p.monthAggregate.tokens.input ?? 0) > 0;
+    const hasFee = p.monthlyFeeUsd !== undefined;
+    if (!hasUsage && !hasFee) continue;
+    const item: import("./types").SubscriptionValue = {
+      providerId: p.id,
+      label: p.label,
+      monthlyFeeUsd: p.monthlyFeeUsd,
+      apiEquivalentMonthUsd: p.monthAggregate.apiEquivalentCost ?? 0,
+    };
+    if (p.monthlyFeeUsd !== undefined && p.monthlyFeeUsd > 0) {
+      item.multiple = item.apiEquivalentMonthUsd / p.monthlyFeeUsd;
+      monthlyTotalUsd += p.monthlyFeeUsd;
+    }
+    apiEquivalentMonthUsd += item.apiEquivalentMonthUsd;
+    items.push(item);
+  }
+  return { monthlyTotalUsd, apiEquivalentMonthUsd, items };
 }
 
 // Pequeno helper exportado para outras tarefas testarem a forma dos dados

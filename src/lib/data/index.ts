@@ -116,3 +116,11 @@ export function stopPolling(): void {
 // Re-exporta o watcher de orçamento e helpers para a UI consumir.
 export { runBudgetWatcher } from "./budget-watcher";
 export { useSettings } from "./settings";
+
+// v2: catálogo de modelos (usa o índice do `models.json` carregado pelo
+// `RealDataSource` via `_setCatalogSource`).
+export { searchCatalog, _setCatalogSource } from "./catalog";
+
+// v2: helpers de provedores / billing (consumidos por outras camadas internas,
+// mas re-exportados por conveniência).
+export { inferBilling } from "./providers";

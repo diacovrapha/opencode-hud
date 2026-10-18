@@ -5,6 +5,12 @@
 //
 // Quando rodando fora do Tauri (browser), as operações de store e autostart
 // são silenciosamente ignoradas (mantendo o app funcionando em dev).
+//
+// A partir da v2, `providers` e `customPrices` são objetos.Record<string, ...>
+// e DEVEM ser mesclados campo a campo no `update` — do contrário, um patch
+// com `{ providers: { anthropic: ... } }` apagaria os outros provedores
+// que já estavam salvos. As helpers (`setProviderSetting`, `setCustomPrice`,
+// `completeOnboarding`) encapsulam essa regra.
 
 import { create } from "zustand";
 import {
@@ -14,7 +20,12 @@ import {
 } from "@tauri-apps/plugin-autostart";
 import { load, type Store } from "@tauri-apps/plugin-store";
 
-import { DEFAULT_SETTINGS, type Settings } from "./types";
+import {
+  DEFAULT_SETTINGS,
+  type CustomPrice,
+  type ProviderSetting,
+  type Settings,
+} from "./types";
 
 const STORE_PATH = "settings.json";
 const STORE_KEY = "settings";
@@ -24,6 +35,10 @@ const SETTINGS_KEYS = [
   "budgetMonthly",
   "currency",
   "referenceModel",
+  "referenceMode",
+  "providers",
+  "customPrices",
+  "onboardingDone",
   "refreshSeconds",
   "autostart",
   "widgetExpanded",
@@ -42,13 +57,37 @@ async function getStore(): Promise<Store | null> {
   }
 }
 
-/** Lê Settings do store, mesclando com os defaults. */
+/** Faz merge profundo dos campos Record (providers/customPrices) sobre os defaults. */
+function mergeSettings(saved: Partial<Settings> | null | undefined): Settings {
+  const base: Settings = { ...DEFAULT_SETTINGS };
+  if (!saved) return base;
+  return {
+    ...base,
+    ...saved,
+    providers: mergeRecord(base.providers, saved.providers),
+    customPrices: mergeRecord(base.customPrices, saved.customPrices),
+  };
+}
+
+function mergeRecord<T>(
+  base: Record<string, T>,
+  saved: Record<string, T> | undefined,
+): Record<string, T> {
+  if (!saved) return { ...base };
+  const out: Record<string, T> = { ...base };
+  for (const [k, v] of Object.entries(saved)) {
+    if (v !== undefined) out[k] = v;
+  }
+  return out;
+}
+
+/** Lê Settings do store, mesclando com os defaults (deep merge dos Records). */
 export async function loadSettings(): Promise<Settings> {
   const store = await getStore();
   if (!store) return { ...DEFAULT_SETTINGS };
   try {
     const v = await store.get<Partial<Settings>>(STORE_KEY);
-    return { ...DEFAULT_SETTINGS, ...(v ?? {}) };
+    return mergeSettings(v ?? null);
   } catch {
     return { ...DEFAULT_SETTINGS };
   }
@@ -94,6 +133,63 @@ export async function syncAutostart(desired: boolean): Promise<void> {
   }
 }
 
+// ---------- helpers públicos para a UI ----------
+
+/**
+ * Atualiza (ou remove, com `setting` faltando `billing`) a configuração de UM
+ * provedor, preservando todos os outros. Bypassa o "merge" do `update`
+ * genérico (que só adiciona/atualiza entradas), porque o caller aqui manda o
+ * `set` completo de providers.
+ */
+export async function setProviderSetting(
+  providerId: string,
+  setting: ProviderSetting,
+): Promise<void> {
+  const cur = useSettings.getState().settings;
+  const nextProviders: Record<string, ProviderSetting> = { ...cur.providers };
+  if (!setting || (setting as { billing?: unknown }).billing === undefined) {
+    delete nextProviders[providerId];
+  } else {
+    nextProviders[providerId] = setting;
+  }
+  const next: Settings = { ...cur, providers: nextProviders };
+  useSettings.setState({ settings: next });
+  await saveSettings(next);
+}
+
+/**
+ * Define (ou remove, com `price = null`) o preço manual de um modelo
+ * ("provider/model"). Preserva os outros preços já salvos.
+ */
+export async function setCustomPrice(
+  key: string,
+  price: CustomPrice | null,
+): Promise<void> {
+  const cur = useSettings.getState().settings;
+  const nextPrices: Record<string, CustomPrice> = { ...cur.customPrices };
+  if (price === null) {
+    delete nextPrices[key];
+  } else {
+    nextPrices[key] = price;
+  }
+  const next: Settings = { ...cur, customPrices: nextPrices };
+  useSettings.setState({ settings: next });
+  await saveSettings(next);
+}
+
+/**
+ * Marca a tela de boas-vindas como concluída. Idempotente.
+ */
+export async function completeOnboarding(): Promise<void> {
+  const cur = useSettings.getState().settings;
+  if (cur.onboardingDone) return;
+  const next: Settings = { ...cur, onboardingDone: true };
+  useSettings.setState({ settings: next });
+  await saveSettings(next);
+}
+
+// ---------- store (zustand) ----------
+
 type SettingsState = {
   settings: Settings;
   hydrated: boolean;
@@ -129,7 +225,17 @@ export const useSettings = create<SettingsState>((set, get) => ({
     set({ settings: s, hydrated: true });
   },
   update: async (partial) => {
-    const next = { ...get().settings, ...partial };
+    const cur = get().settings;
+    // Merge profundo dos Records: `partial.providers` é fundido com `cur.providers`,
+    // não substituído. Sem essa regra, "atualizar 1 provedor" apagaria os outros.
+    const nextProviders = mergeRecord(cur.providers, partial.providers);
+    const nextPrices = mergeRecord(cur.customPrices, partial.customPrices);
+    const next: Settings = {
+      ...cur,
+      ...partial,
+      providers: nextProviders,
+      customPrices: nextPrices,
+    };
     set({ settings: next });
     await saveSettings(next);
     if (partial.autostart !== undefined) {
