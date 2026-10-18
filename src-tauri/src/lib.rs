@@ -204,12 +204,13 @@ fn build_tray(app: &AppHandle, state: TrayState) -> tauri::Result<()> {
     let open_dash = MenuItem::with_id(app, "open_dashboard", "Abrir dashboard", true, None::<&str>)?;
     let toggle_widget =
         MenuItem::with_id(app, "toggle_widget", "Mostrar/ocultar widget", true, None::<&str>)?;
+    // O item já nasce marcado conforme o estado real do Windows.
     let autostart = CheckMenuItem::with_id(
         app,
         "autostart",
         "Iniciar com o Windows",
         true,
-        false,
+        app.autolaunch().is_enabled().unwrap_or(false),
         None::<&str>,
     )?;
     let sep = PredefinedMenuItem::separator(app)?;
@@ -292,18 +293,21 @@ fn build_tray(app: &AppHandle, state: TrayState) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Só reflete no menu da bandeja o estado real do "iniciar com o Windows".
+/// NÃO liga sozinho: a primeira ativação é feita pelo front (settings.ts)
+/// apenas na primeira execução; depois disso a escolha do usuário manda.
 fn sync_autostart_state(app: &AppHandle, state: &TrayState) {
-    let manager = app.autolaunch();
-    let enabled = manager.is_enabled().unwrap_or(false);
+    let enabled = app.autolaunch().is_enabled().unwrap_or(false);
     if let Some(item) = state.autostart_item.as_ref() {
         let _ = item.set_checked(enabled);
     }
-    if !enabled {
-        let _ = manager.enable();
-        if let Some(item) = state.autostart_item.as_ref() {
-            let _ = item.set_checked(true);
-        }
-    }
+}
+
+/// Argumentos que indicam "abrir em segundo plano" (login do Windows ou o
+/// plugin do opencode). Nesses casos uma segunda instância não deve abrir
+/// o dashboard — o HUD já está rodando, então não há nada a fazer.
+fn is_background_launch(argv: &[String]) -> bool {
+    argv.iter().any(|a| a == "--background" || a == "--autostart")
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -313,7 +317,10 @@ pub fn run() {
     tauri::Builder::default()
         // single-instance deve ser registrado PRIMEIRO para capturar a segunda
         // instância antes que ela crie janelas.
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if is_background_launch(&argv) {
+                return;
+            }
             if let Err(e) = ensure_dashboard(app) {
                 eprintln!("ensure_dashboard: {e}");
             }

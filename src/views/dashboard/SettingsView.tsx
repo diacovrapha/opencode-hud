@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { MetricTooltip } from "@/components/hud/MetricTooltip";
+import { cn } from "@/lib/utils";
 import type { Settings } from "@/lib/data/types";
 
 const REFERENCE_MODELS = [
@@ -136,7 +137,7 @@ export function SettingsView({ settings, update }: Props): React.JSX.Element {
           <MetricTooltip content="Modelo usado como referência para calcular quanto você teria gasto na API. A economia é a diferença entre esse custo e o custo real." />
         </div>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <Field label="Modelo de referência" hint="Sugeridos:">
+          <Field label="Modelo de referência" hint="Sugeridos abaixo; clicar aplica o valor.">
             <Select
               value={knownRef ? knownRef.value : "__custom__"}
               onValueChange={(v) => {
@@ -158,6 +159,35 @@ export function SettingsView({ settings, update }: Props): React.JSX.Element {
                 <SelectItem value="__custom__">Personalizado…</SelectItem>
               </SelectContent>
             </Select>
+            <div
+              role="group"
+              aria-label="Modelos de referência sugeridos"
+              className="mt-1.5 flex flex-wrap items-center gap-1.5"
+            >
+              <span className="text-[11px] text-muted-foreground">Sugeridos:</span>
+              {REFERENCE_MODELS.map((m) => {
+                const selected = refModel === m.value;
+                return (
+                  <button
+                    key={m.value}
+                    type="button"
+                    aria-pressed={selected}
+                    onClick={() => {
+                      setRefModel(m.value);
+                      void update({ referenceModel: m.value });
+                    }}
+                    className={cn(
+                      "rounded-full border px-2 py-0.5 text-[11px] transition-colors",
+                      selected
+                        ? "border-violet-400/50 bg-violet-500/20 text-violet-100"
+                        : "border-white/10 bg-white/5 text-muted-foreground hover:border-violet-300/40 hover:text-foreground",
+                    )}
+                  >
+                    {m.label}
+                  </button>
+                );
+              })}
+            </div>
             {(customRef || !knownRef) && (
               <Input
                 className="mt-2"

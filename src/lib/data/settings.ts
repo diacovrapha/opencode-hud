@@ -54,6 +54,17 @@ export async function loadSettings(): Promise<Settings> {
   }
 }
 
+/** Já existe alguma configuração salva (ou seja, não é a primeira execução)? */
+async function hasSavedSettings(): Promise<boolean> {
+  const store = await getStore();
+  if (!store) return true; // sem store (navegador): não mexe no autostart
+  try {
+    return (await store.get(STORE_KEY)) != null;
+  } catch {
+    return true;
+  }
+}
+
 /** Persiste Settings no store. */
 export async function saveSettings(s: Settings): Promise<void> {
   const store = await getStore();
@@ -95,10 +106,27 @@ export const useSettings = create<SettingsState>((set, get) => ({
   hydrated: false,
   hydrate: async () => {
     if (get().hydrated) return;
+    const firstRun = !(await hasSavedSettings());
     const s = await loadSettings();
+    if (firstRun) {
+      // Primeira execução: liga o "iniciar com o Windows" (padrão do app)
+      // e grava as configurações, para isso não acontecer de novo.
+      await syncAutostart(s.autostart);
+      await saveSettings(s);
+    } else {
+      // Depois disso, quem manda é o estado REAL do Windows: o usuário pode
+      // ter desligado pelo menu da bandeja. Nunca religamos por conta própria.
+      const osEnabled = await isAutostartEnabled().catch(() => null);
+      if (osEnabled !== null && osEnabled !== s.autostart) {
+        s.autostart = osEnabled;
+        await saveSettings(s);
+      }
+      // Se está ligado, regrava a entrada para apontar para ESTE executável
+      // (ex.: depois de instalar/atualizar, ou se antes rodava uma build de
+      // desenvolvimento em outro caminho). Não muda a escolha do usuário.
+      if (osEnabled) await enableAutostart().catch(() => {});
+    }
     set({ settings: s, hydrated: true });
-    // Garante consistência com o OS no primeiro hydrate.
-    await syncAutostart(s.autostart);
   },
   update: async (partial) => {
     const next = { ...get().settings, ...partial };
