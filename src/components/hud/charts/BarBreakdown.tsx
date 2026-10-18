@@ -1,7 +1,8 @@
 import * as React from "react";
 import type { EChartsOption } from "echarts";
 import { EChart, HUD_THEME } from "./EChart";
-import { formatTokens } from "@/lib/ui/format";
+import { formatMoney, formatTokens, type MoneyFmt } from "@/lib/ui/format";
+import { shortModelLabel } from "./ModelDonut";
 
 type BarItem = {
   label: string;
@@ -15,22 +16,33 @@ type BarBreakdownProps = {
   className?: string;
   /** Se for true, formata como tokens (mi, mil). */
   asTokens?: boolean;
+  /** Formata os valores como dinheiro (USD → moeda da UI). */
+  fmt?: MoneyFmt;
 };
 
 /**
  * Gráfico de barras horizontais (top N). Mostra rótulo à esquerda e
- * valor à direita.
+ * valor à direita. Rótulos "provedor/modelo" aparecem só com o modelo
+ * (o nome completo fica no tooltip).
  */
 export function BarBreakdown({
   items,
   unit,
   className,
   asTokens = false,
+  fmt,
 }: BarBreakdownProps): React.JSX.Element {
   const option = React.useMemo<EChartsOption>(() => {
-    const labels = items.map((i) => i.label);
+    const labels = items.map((i) => shortModelLabel(i.label));
+    const fullLabels = items.map((i) => i.label);
     const values = items.map((i) => i.value);
     const max = Math.max(...values, 1);
+    const fmtValue = (v: number): string =>
+      asTokens
+        ? formatTokens(v)
+        : fmt
+          ? formatMoney(v, fmt, { hideSecondary: true }).primary
+          : `${v.toLocaleString("pt-BR", { maximumFractionDigits: 2 })}${unit ?? ""}`;
 
     return {
       backgroundColor: HUD_THEME.backgroundColor,
@@ -43,11 +55,12 @@ export function BarBreakdown({
             axisValue: string;
             value: number | string;
             name: string;
+            dataIndex: number;
           }>;
           if (!Array.isArray(arr) || arr.length === 0) return "";
           const v = Number(arr[0].value);
-          const label = asTokens ? formatTokens(v) : `${v.toLocaleString("pt-BR")}${unit ?? ""}`;
-          return `<div style="font-weight:600">${arr[0].axisValue}</div><div style="color:#c4b5fd">${label}</div>`;
+          const name = fullLabels[arr[0].dataIndex] ?? arr[0].axisValue;
+          return `<div style="font-weight:600">${name}</div><div style="color:#c4b5fd">${fmtValue(v)}</div>`;
         },
       },
       grid: {
@@ -72,7 +85,7 @@ export function BarBreakdown({
           color: "rgba(226, 232, 240, 0.85)",
           fontSize: 11,
           formatter: (v: string): string => {
-            const max = 14;
+            const max = 22;
             return v.length > max ? v.slice(0, max - 1) + "…" : v;
           },
         },
@@ -117,15 +130,12 @@ export function BarBreakdown({
             color: "rgba(226, 232, 240, 0.85)",
             fontSize: 11,
             fontWeight: 600,
-            formatter: (p): string => {
-              const v = Number((p as { value: number | string }).value);
-              return asTokens ? formatTokens(v) : v.toLocaleString("pt-BR");
-            },
+            formatter: (p): string => fmtValue(Number((p as { value: number | string }).value)),
           },
         },
       ],
     };
-  }, [items, unit, asTokens]);
+  }, [items, unit, asTokens, fmt]);
 
   return <EChart option={option} className={className} />;
 }

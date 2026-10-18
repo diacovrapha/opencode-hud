@@ -4,7 +4,7 @@ import { SessionTree } from "@/components/hud/SessionTree";
 import { EmptyState } from "@/components/hud/EmptyState";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import type { Snapshot } from "@/lib/data/types";
-import type { MoneyFmt } from "@/lib/ui/format";
+import { formatNumber, type MoneyFmt } from "@/lib/ui/format";
 import { ListTree } from "lucide-react";
 
 type Props = {
@@ -29,11 +29,7 @@ export function SessionsView({ snapshot, fmt }: Props): React.JSX.Element {
   return (
     <div className="grid grid-cols-1 gap-3 lg:grid-cols-[2fr_1fr]">
       <Card className="glass border-white/10 p-4">
-        <SessionTree
-          sessions={sessions}
-          fmt={fmt}
-          onSelect={setSelected}
-        />
+        <SessionTree sessions={sessions} fmt={fmt} onSelect={setSelected} />
       </Card>
       <Card className="glass sticky top-0 max-h-[80vh] border-white/10 p-4">
         <div className="mb-2 text-sm font-semibold">Detalhes</div>
@@ -69,18 +65,20 @@ function SessionDetail({
         <div className="break-all text-[11px] text-muted-foreground">{session.directory}</div>
       </div>
       <div className="grid grid-cols-2 gap-2">
-        <Mini label="Custo" value={`$${session.aggregate.cost.toFixed(4)}`} />
-        <Mini label="Msgs" value={String(session.aggregate.messages)} />
-        <Mini label="Entrada" value={t.input.toLocaleString("pt-BR")} />
-        <Mini label="Saída" value={t.output.toLocaleString("pt-BR")} />
-        <Mini label="Raciocínio" value={t.reasoning.toLocaleString("pt-BR")} />
-        <Mini label="Cache lido" value={t.cacheRead.toLocaleString("pt-BR")} />
-        <Mini label="Cache escrito" value={t.cacheWrite.toLocaleString("pt-BR")} />
+        <Mini label="Custo (USD)" value={formatNumber(session.aggregate.cost, 4)} />
+        <Mini label="Msgs" value={formatNumber(session.aggregate.messages)} />
+        <Mini label="Entrada" value={formatNumber(t.input)} />
+        <Mini label="Saída" value={formatNumber(t.output)} />
+        <Mini label="Raciocínio" value={formatNumber(t.reasoning)} />
+        <Mini label="Cache lido" value={formatNumber(t.cacheRead)} />
+        <Mini label="Cache escrito" value={formatNumber(t.cacheWrite)} />
       </div>
       <div className="rounded-md border border-white/5 bg-white/5 p-2 text-[11px] text-muted-foreground">
         Cotação USD/BRL usada:{" "}
         <span className="tabular text-foreground">
-          {fmt.usdBrlRate ? fmt.usdBrlRate.toFixed(2) : "indisponível"}
+          {fmt.usdBrlRate
+            ? `R$ ${fmt.usdBrlRate.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+            : "indisponível"}
         </span>
       </div>
     </div>

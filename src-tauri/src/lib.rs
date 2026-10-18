@@ -18,6 +18,13 @@ use tauri_plugin_autostart::{ManagerExt, MacosLauncher};
 const WIN_DASHBOARD: &str = "dashboard";
 const WIN_WIDGET: &str = "widget";
 
+// Tamanhos do widget (largura × altura em pixels lógicos, DIPs).
+// Compacto: cabeçalho + "Hoje" + barra de orçamento + linha de tokens/sessão.
+// Expandido: lista rolável de sessões/modelos/agentes.
+pub const WIDGET_W: f64 = 340.0;
+pub const WIDGET_COMPACT_H: f64 = 158.0;
+pub const WIDGET_EXPANDED_H: f64 = 460.0;
+
 // Estado compartilhado entre callbacks do tray e o setup.
 #[derive(Clone, Default)]
 pub struct TrayState {
@@ -55,19 +62,21 @@ fn hide_dashboard_if_visible(app: &AppHandle) {
 }
 
 fn ensure_widget(app: &AppHandle) -> tauri::Result<()> {
-    if app.get_webview_window(WIN_WIDGET).is_some() {
-        return Ok(());
-    }
-    let url = WebviewUrl::App("index.html?view=widget#/widget".into());
-
-    // O widget é construído sem posição fixa e depois posicionado a partir
-    // do monitor principal (via window após o build). Definir a posição
-    // ANTES do build é frágil porque `window-state` pode sobrescrever.
-    let window = WebviewWindowBuilder::new(app, WIN_WIDGET, url)
+    // ATENÇÃO: o widget normalmente JÁ EXISTE aqui, porque está declarado em
+    // tauri.conf.json (o Tauri cria as janelas do config antes do setup).
+    // A versão antiga saía com `return` nesse caso e nunca posicionava a
+    // janela — por isso o widget abria sempre no canto errado.
+    let window = match app.get_webview_window(WIN_WIDGET) {
+        Some(w) => w,
+        None => WebviewWindowBuilder::new(
+            app,
+            WIN_WIDGET,
+            WebviewUrl::App("index.html?view=widget#/widget".into()),
+        )
         .title("opencode HUD widget")
-        .inner_size(340.0, 120.0)
-        .min_inner_size(340.0, 120.0)
-        .max_inner_size(1200.0, 720.0)
+        .inner_size(WIDGET_W, WIDGET_COMPACT_H)
+        .min_inner_size(WIDGET_W, WIDGET_COMPACT_H)
+        .max_inner_size(WIDGET_W, WIDGET_EXPANDED_H)
         .decorations(false)
         .transparent(true)
         .shadow(false)
@@ -75,19 +84,26 @@ fn ensure_widget(app: &AppHandle) -> tauri::Result<()> {
         .skip_taskbar(true)
         .visible(true)
         .resizable(false)
-        .build()?;
+        .build()?,
+    };
 
-    // Posiciona no canto superior direito do monitor principal (com fallback).
-    place_widget_top_right(&window);
-    // Reaplica a posição após um pequeno delay, garantindo que sobreviva a
-    // plugins como window-state que restauram estado após o build.
-    let w2 = window.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(800));
-        place_widget_top_right(&w2);
-        ensure_widget_within_monitors(&w2);
-    });
+    // Primeira execução (nenhuma posição salva pelo window-state): canto
+    // superior direito. Se o usuário já arrastou o widget, respeitamos a
+    // posição salva — desde que ela ainda caia em algum monitor.
+    if !has_saved_widget_position(app) {
+        place_widget_top_right(&window);
+    }
+    ensure_widget_within_monitors(&window);
     Ok(())
+}
+
+/// O plugin window-state grava `.window-state.json` no diretório de config
+/// do app, com uma chave por label de janela.
+fn has_saved_widget_position(app: &AppHandle) -> bool {
+    let Ok(dir) = app.path().app_config_dir() else { return false };
+    std::fs::read_to_string(dir.join(".window-state.json"))
+        .map(|s| s.contains(&format!("\"{WIN_WIDGET}\"")))
+        .unwrap_or(false)
 }
 
 /// Posiciona `window` no canto superior direito do monitor principal.
@@ -106,60 +122,34 @@ fn place_widget_top_right(window: &tauri::WebviewWindow) {
         });
     let Some(m) = primary else { return; };
     let usable = m.work_area();
-    let mw = usable.size.width as f64;
-    let mh = usable.size.height as f64;
-    if mw <= 0.0 || mh <= 0.0 {
+    let mw_phys = usable.size.width as f64;
+    let mh_phys = usable.size.height as f64;
+    if mw_phys <= 0.0 || mh_phys <= 0.0 {
         return;
     }
-    let margin = 16.0;
-    let ww = 340.0;
-    let _wh = 120.0;
-    let x = (usable.position.x as f64) + (mw - ww - margin).max(0.0);
-    let y = (usable.position.y as f64) + margin;
+    let margin_phys: f64 = 16.0; // margem pequena em pixels físicos.
+    let scale = window.scale_factor().unwrap_or(1.0).max(0.01);
+    let widget_w_phys = (WIDGET_W * scale).ceil();
+    let widget_h_phys = (WIDGET_COMPACT_H * scale).ceil();
+    let x_phys = (usable.position.x as f64) + (mw_phys - widget_w_phys - margin_phys).max(0.0);
+    let y_phys = (usable.position.y as f64) + margin_phys;
+    let _ = (widget_h_phys, mh_phys);
     eprintln!(
-        "[widget] monitor pos=({},{}) size=({},{}) work=({},{} {}x{}) -> widget at ({},{})",
-        m.position().x, m.position().y, m.size().width, m.size().height,
+        "[widget] monitor work=({},{} {}x{}) scale={} widget_phys={}x{} -> at ({},{})",
         usable.position.x, usable.position.y, usable.size.width, usable.size.height,
-        x, y,
+        scale, widget_w_phys, widget_h_phys, x_phys, y_phys,
     );
-    let _ = window.set_position(tauri::LogicalPosition::new(x, y));
+    let _ = window.set_position(tauri::PhysicalPosition::new(
+        x_phys.round() as i32,
+        y_phys.round() as i32,
+    ));
 }
 
-/// Devolve a posição (x, y) — canto superior direito do monitor principal
-/// considerando DPI e área de trabalho (sem cobrir a barra de tarefas).
-/// (Mantida por compat — não está sendo usada; o posicionamento real é
-/// feito por `place_widget_top_right` depois do build.)
-#[allow(dead_code)]
-fn primary_top_right_for(app: &AppHandle, width: f64, height: f64, margin: f64) -> (f64, f64) {
-    let primary = app
-        .primary_monitor()
-        .ok()
-        .flatten()
-        .or_else(|| app.available_monitors().ok().and_then(|m| m.into_iter().next()));
-    if let Some(m) = primary {
-        // `monitor.position()` está em DIPs — `Monitor::size()` igual.
-        // O position final do canto superior direito é:
-        //   x = posição_x_monitor + largura_monitor - widget_width - margem
-        //   y = posição_y_monitor + margem (mas respeitando usable_area)
-        let usable = m.work_area();
-        // Fallback se work_area for degenerado (raro):
-        let (target_w, target_h) = if usable.size.width > 0 && usable.size.height > 0 {
-            (usable.size.width as f64, usable.size.height as f64)
-        } else {
-            (m.size().width as f64, m.size().height as f64)
-        };
-        let _ = (target_h, height); // evitarmos warning; só usamos width p/ canto direito
-        let x = (usable.position.x as f64) + (target_w - width - margin).max(0.0);
-        let y = (usable.position.y as f64) + margin;
-        return (x, y);
-    }
-    // Sem informação: cai num canto seguro em 1920x1080.
-    (1920.0 - width - margin, margin)
-}
-
-/// Se a posição atual da janela não cair dentro de nenhum monitor,
-/// reposiciona-a no canto superior direito do monitor principal.
-/// Usa unidades lógicas (DIPs).
+/// Se a posição atual da janela não cair dentro de nenhum monitor
+/// (monitor desconectado, restaurada para fora da tela, etc.), recoloca
+/// o widget no canto superior direito do monitor principal.
+///
+/// Tudo em pixels físicos (consistente com `place_widget_top_right`).
 fn ensure_widget_within_monitors(window: &tauri::WebviewWindow) {
     let Ok(monitors) = window.available_monitors() else { return };
     if monitors.is_empty() {
@@ -167,19 +157,14 @@ fn ensure_widget_within_monitors(window: &tauri::WebviewWindow) {
     }
     let Ok(current_pos) = window.outer_position() else { return };
     let Ok(current_size) = window.outer_size() else { return };
-    let scale = window.scale_factor().unwrap_or(1.0);
-    let cw = (current_pos.x as f64) / scale;
-    let ch = (current_pos.y as f64) / scale;
-    let cw_w = (current_size.width as f64) / scale;
-    let ch_h = (current_size.height as f64) / scale;
 
     let inside_any = monitors.iter().any(|m| {
         let p = m.position();
         let s = m.size();
-        cw + cw_w > p.x as f64
-            && cw < p.x as f64 + s.width as f64
-            && ch + ch_h > p.y as f64
-            && ch < p.y as f64 + s.height as f64
+        current_pos.x as i64 + current_size.width as i64 > p.x as i64
+            && (current_pos.x as i64) < p.x as i64 + s.width as i64
+            && current_pos.y as i64 + current_size.height as i64 > p.y as i64
+            && (current_pos.y as i64) < p.y as i64 + s.height as i64
     });
     if inside_any {
         return;
@@ -188,12 +173,16 @@ fn ensure_widget_within_monitors(window: &tauri::WebviewWindow) {
     // Fallback: canto superior direito do monitor principal.
     if let Ok(Some(primary)) = window.primary_monitor() {
         let usable = primary.work_area();
-        let w = primary.size().width as f64;
-        let margin = 16.0;
-        let x = (usable.position.x as f64) + (w - cw_w - margin).max(0.0);
-        let y = (usable.position.y as f64) + margin;
-        let _ = ch_h; // referência mantida (não usamos — o widget tem tamanho fixo)
-        let _ = window.set_position(tauri::LogicalPosition::new(x, y));
+        let scale = window.scale_factor().unwrap_or(1.0).max(0.01);
+        let widget_w_phys = (WIDGET_W * scale).ceil();
+        let margin_phys: f64 = 16.0;
+        let x_phys = (usable.position.x as f64)
+            + (usable.size.width as f64 - widget_w_phys - margin_phys).max(0.0);
+        let y_phys = (usable.position.y as f64) + margin_phys;
+        let _ = window.set_position(tauri::PhysicalPosition::new(
+            x_phys.round() as i32,
+            y_phys.round() as i32,
+        ));
     }
 }
 

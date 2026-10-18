@@ -9,35 +9,25 @@ type TitleBarProps = {
   className?: string;
 };
 
-/** Helper: devolve a janela atual do Tauri só quando rodando dentro do Tauri. */
-function tryGetCurrentWindow(): ReturnType<typeof getCurrentWindow> | null {
-  if (typeof window === "undefined") return null;
-  if (!("__TAURI_INTERNALS__" in window)) return null;
-  try {
-    return getCurrentWindow();
-  } catch {
-    return null;
-  }
+/** "true" só quando rodando dentro do Tauri (vite dev/test = false). */
+function isInTauri(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
 /**
  * Barra de título customizada: substitui as decorações nativas.
  * - Área central é arrastável (`data-tauri-drag-region`).
  * - Botões à direita: minimizar, maximizar, fechar.
+ *
+ * `getCurrentWindow()` é chamado APENAS dentro dos handlers, depois do
+ * `isInTauri()` retornar `true`. Chamá-lo durante o render quebra a
+ * renderização fora do Tauri (vite dev/test).
  */
 export function TitleBar({ title = "opencode HUD", className }: TitleBarProps): React.JSX.Element {
-  // NÃO chamamos `getCurrentWindow()` durante o render — isso quebra a página
-  // fora do Tauri (vite dev). Em vez disso, capturamos a instância lazy,
-  // uma vez, e checamos se estamos no Tauri.
-  const winRef = React.useRef<ReturnType<typeof getCurrentWindow> | null>(null);
-  if (winRef.current === null) {
-    winRef.current = tryGetCurrentWindow();
-  }
-
   async function toggleMaximize(): Promise<void> {
-    const win = winRef.current;
-    if (!win) return;
+    if (!isInTauri()) return;
     try {
+      const win = getCurrentWindow();
       const isMax = await win.isMaximized();
       await (isMax ? win.unmaximize() : win.maximize());
     } catch (e) {
@@ -46,20 +36,18 @@ export function TitleBar({ title = "opencode HUD", className }: TitleBarProps): 
   }
 
   async function minimize(): Promise<void> {
-    const win = winRef.current;
-    if (!win) return;
+    if (!isInTauri()) return;
     try {
-      await win.minimize();
+      await getCurrentWindow().minimize();
     } catch (e) {
       console.warn("minimize:", e);
     }
   }
 
   async function closeWindow(): Promise<void> {
-    const win = winRef.current;
-    if (!win) return;
+    if (!isInTauri()) return;
     try {
-      await win.hide();
+      await getCurrentWindow().hide();
     } catch (e) {
       console.warn("hide:", e);
     }

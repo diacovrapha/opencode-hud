@@ -1,8 +1,7 @@
 import * as React from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
+import { getCurrentWindow, PhysicalSize } from "@tauri-apps/api/window";
 import {
-  Activity,
   ChevronDown,
   ChevronUp,
   Coins,
@@ -27,13 +26,21 @@ import { BudgetBar } from "@/components/hud/BudgetBar";
 import { Money } from "@/components/hud/Money";
 import { TokenCount } from "@/components/hud/TokenCount";
 import { cn } from "@/lib/utils";
+import { formatBrlNumber } from "@/lib/ui/format";
 import type { SessionInfo } from "@/lib/data/types";
 import type { MoneyFmt } from "@/lib/ui/format";
 
+// Tamanhos do widget (em DIPs). Devem casar com WIDGET_W/WIDGET_COMPACT_H/
+// WIDGET_EXPANDED_H em src-tauri/src/lib.rs.
 const COMPACT_W = 340;
-const COMPACT_H = 120;
+const COMPACT_H = 158;
 const EXPANDED_W = 340;
 const EXPANDED_H = 460;
+
+/** "true" só dentro do Tauri; fora do Tauri (vite dev/test) retorna false. */
+function isInTauri(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
 
 export function Widget(): React.JSX.Element {
   // Garante html/body transparentes para esta janela.
@@ -42,7 +49,7 @@ export function Widget(): React.JSX.Element {
     return () => document.documentElement.classList.remove("transparent-window");
   }, []);
 
-  const { snapshot, refresh, period } = useSnapshotStore();
+  const { snapshot, refresh } = useSnapshotStore();
   const { settings, update } = useSettings();
   const [running, setRunning] = React.useState<boolean | null>(null);
   const [hover, setHover] = React.useState(false);
@@ -87,20 +94,24 @@ export function Widget(): React.JSX.Element {
   // Redimensiona a janela quando expandir/recolher.
   React.useEffect(() => {
     let cancelled = false;
+    if (!isInTauri()) {
+      // Fora do Tauri (vite dev), só persiste a preferência.
+      void update({ widgetExpanded: expanded });
+      return;
+    }
     (async (): Promise<void> => {
       try {
         const win = getCurrentWindow();
         if (expanded) {
-          await win.setSize(new LogicalSize(EXPANDED_W, EXPANDED_H));
+          await win.setSize(new PhysicalSize(EXPANDED_W, EXPANDED_H));
         } else {
-          await win.setSize(new LogicalSize(COMPACT_W, COMPACT_H));
-        }
-        if (!cancelled) {
-          update({ widgetExpanded: expanded });
+          await win.setSize(new PhysicalSize(COMPACT_W, COMPACT_H));
         }
       } catch (e) {
-        // Em ambiente de browser (vite dev), getCurrentWindow/setSize pode falhar.
         console.warn("widget resize:", e);
+      }
+      if (!cancelled) {
+        await update({ widgetExpanded: expanded });
       }
     })();
     return () => {
@@ -129,15 +140,16 @@ export function Widget(): React.JSX.Element {
       : 0;
 
   const dailyLimit = settings.budgetDaily ?? snapshot?.budget.daily ?? 0;
-  const dailyUsd = settings.currency === "BRL" && fmt.usdBrlRate
-    ? todayCost
-    : todayCost;
-  // Para a barra, usamos USD (que é o que `dailyLimit` em BRL precisa ser convertido).
-  const dailyLimitUsd = settings.currency === "BRL" && fmt.usdBrlRate
-    ? dailyLimit / fmt.usdBrlRate
-    : dailyLimit;
+  const dailyLimitCurrency = settings.currency;
+  // Para a barra, o widget sempre trata o valor gasto em USD (a unidade da app).
+  const dailyUsd = todayCost;
+  const dailyLimitUsd =
+    dailyLimitCurrency === "BRL" && fmt.usdBrlRate
+      ? dailyLimit / fmt.usdBrlRate
+      : dailyLimit;
 
   const onOpenDashboard = async (): Promise<void> => {
+    if (!isInTauri()) return;
     try {
       const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
       // Tenta achar/mostrar a janela dashboard.
@@ -157,12 +169,16 @@ export function Widget(): React.JSX.Element {
   };
 
   const onHide = async (): Promise<void> => {
+    if (!isInTauri()) return;
     try {
       await getCurrentWindow().hide();
     } catch (e) {
       console.warn("hide widget:", e);
     }
   };
+
+  // Texto curto da cotação, em pt-BR (ex.: "R$ 5,06"). Sem valor → "—".
+  const rateLabel = fmt.usdBrlRate ? `R$ ${formatBrlNumber(fmt.usdBrlRate, 2)}` : "—";
 
   return (
     <motion.div
@@ -199,10 +215,22 @@ export function Widget(): React.JSX.Element {
                 <ChevronUp className="h-3.5 w-3.5" />
               )}
             </IconBtn>
-            <IconBtn label="Abrir dashboard" onClick={(e) => { e.stopPropagation(); void onOpenDashboard(); }}>
+            <IconBtn
+              label="Abrir dashboard"
+              onClick={(e) => {
+                e.stopPropagation();
+                void onOpenDashboard();
+              }}
+            >
               <ExternalLink className="h-3.5 w-3.5" />
             </IconBtn>
-            <IconBtn label="Ocultar" onClick={(e) => { e.stopPropagation(); void onHide(); }}>
+            <IconBtn
+              label="Ocultar"
+              onClick={(e) => {
+                e.stopPropagation();
+                void onHide();
+              }}
+            >
               <EyeOff className="h-3.5 w-3.5" />
             </IconBtn>
           </motion.div>
@@ -219,8 +247,9 @@ export function Widget(): React.JSX.Element {
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 0.15 }}
-            className="flex h-full w-full flex-col gap-2 p-3"
+            className="flex h-full w-full flex-col gap-1.5 p-3"
           >
+            {/* Cabeçalho: status + cotação discreta */}
             <div
               data-tauri-drag-region
               className="flex items-center justify-between text-[11px] uppercase tracking-wider text-muted-foreground"
@@ -235,11 +264,21 @@ export function Widget(): React.JSX.Element {
                 />
                 {live ? "opencode ativo" : "parado"}
               </span>
-              <span data-tauri-drag-region className="opacity-70">
-                {periodLabel(period)}
-              </span>
+              <MetricTooltip
+                label={
+                  <span data-tauri-drag-region className="text-[10px] opacity-80">
+                    {rateLabel}
+                  </span>
+                }
+                content={
+                  fmt.usdBrlRate
+                    ? `Cotação USD/BRL usada para converter custos. Atualizada ${fmt.rateUpdatedAt ? new Date(fmt.rateUpdatedAt).toLocaleString("pt-BR") : "recentemente"}.`
+                    : "Cotação indisponível — convertendo a partir de USD."
+                }
+              />
             </div>
 
+            {/* Linha do valor do dia */}
             <div data-tauri-drag-region className="flex items-end justify-between">
               <div data-tauri-drag-region>
                 <MetricTooltip
@@ -248,31 +287,18 @@ export function Widget(): React.JSX.Element {
                       Hoje
                     </span>
                   }
-                  content="Custo total das sessões iniciadas hoje. Modelos de assinatura (como o MiniMax Coding Plan) aparecem como R$ 0."
+                  content="Custo total das sessões iniciadas hoje. Modelos de assinatura aparecem como R$ 0."
                 />
                 <div data-tauri-drag-region className="text-2xl font-semibold leading-none">
                   <Money usd={todayCost} fmt={fmt} size="xl" tone="gradient" />
                 </div>
               </div>
-              <div data-tauri-drag-region className="text-right">
-                <MetricTooltip
-                  label={
-                    <span className="text-[11px] text-muted-foreground">
-                      USD/BRL
-                    </span>
-                  }
-                  content={
-                    fmt.usdBrlRate
-                      ? `Cotação usada: R$ ${fmt.usdBrlRate.toFixed(2)} por dólar.`
-                      : "Cotação indisponível."
-                  }
-                />
-                <div data-tauri-drag-region className="text-sm tabular">
-                  {fmt.usdBrlRate ? `R$ ${fmt.usdBrlRate.toFixed(2)}` : "—"}
-                </div>
+              <div data-tauri-drag-region className="text-right text-[11px] text-muted-foreground">
+                <span>{snapshot?.today.sessions ?? 0} sessões</span>
               </div>
             </div>
 
+            {/* Orçamento diário */}
             {dailyLimit > 0 ? (
               <div data-tauri-drag-region>
                 <BudgetBar value={dailyUsd} limit={dailyLimitUsd} />
@@ -281,41 +307,50 @@ export function Widget(): React.JSX.Element {
                   className="mt-1 flex items-center justify-between text-[10px] text-muted-foreground"
                 >
                   <span>
-                    {fmt.primary} {dailyLimit.toFixed(0)} / dia
+                    {dailyLimitCurrency} {dailyLimit.toFixed(0)} / dia
                   </span>
                   <span>
-                    {fmt.usdBrlRate
-                      ? `R$ ${(todayCost * fmt.usdBrlRate).toFixed(2)}`
-                      : `$${todayCost.toFixed(2)}`}
+                    <Money
+                      usd={todayCost}
+                      fmt={fmt}
+                      size="xs"
+                      hideSecondary
+                    />
                   </span>
                 </div>
               </div>
             ) : (
-              <a
-                href="#/settings"
+              <button
+                type="button"
+                data-tauri-drag-region
                 onClick={(e) => {
                   e.preventDefault();
                   e.stopPropagation();
                   void onOpenDashboard();
                 }}
-                className="text-[11px] text-violet-300 underline-offset-2 hover:underline"
+                className="text-left text-[11px] text-violet-300 underline-offset-2 hover:underline"
               >
-                definir orçamento →
-              </a>
+                definir orçamento diário →
+              </button>
             )}
 
+            {/* Tokens de hoje + custo da sessão atual */}
             <div
               data-tauri-drag-region
               className="flex items-center justify-between text-[10px] text-muted-foreground"
             >
               <span data-tauri-drag-region className="flex items-center gap-1">
                 <Layers className="h-3 w-3" />
-                <TokenCount n={todayTokens} short /> hoje
+                <TokenCount n={todayTokens} /> hoje
               </span>
-              {snapshot?.currentSession && (
+              {snapshot?.currentSession ? (
                 <span data-tauri-drag-region className="flex items-center gap-1">
                   <Timer className="h-3 w-3" />
                   sessão: <Money usd={sessionCost} fmt={fmt} size="xs" hideSecondary />
+                </span>
+              ) : (
+                <span data-tauri-drag-region className="opacity-70">
+                  sem sessão ativa
                 </span>
               )}
             </div>
@@ -344,9 +379,18 @@ export function Widget(): React.JSX.Element {
                 />
                 {live ? "opencode ativo" : "parado"}
               </span>
-              <span data-tauri-drag-region className="opacity-70">
-                {periodLabel(period)}
-              </span>
+              <MetricTooltip
+                label={
+                  <span data-tauri-drag-region className="text-[10px] opacity-80">
+                    {rateLabel}
+                  </span>
+                }
+                content={
+                  fmt.usdBrlRate
+                    ? `Cotação USD/BRL: R$ ${fmt.usdBrlRate.toFixed(2)} por dólar.`
+                    : "Cotação indisponível."
+                }
+              />
             </div>
 
             <div className="flex-1 overflow-hidden">
@@ -368,7 +412,7 @@ export function Widget(): React.JSX.Element {
                     <div className="mt-1 flex items-center gap-2 text-[11px] text-muted-foreground">
                       <span className="flex items-center gap-1">
                         <Layers className="h-3 w-3" />
-                        <TokenCount n={todayTokens} short />
+                        <TokenCount n={todayTokens} />
                       </span>
                       <span>·</span>
                       <span>{snapshot?.today.sessions ?? 0} sessões</span>
@@ -408,7 +452,7 @@ export function Widget(): React.JSX.Element {
                         <div className="text-right">
                           <Money usd={sessionCost} fmt={fmt} size="sm" hideSecondary />
                           <div className="text-[10px] text-muted-foreground tabular">
-                            <TokenCount n={sessionTokens} short />
+                            <TokenCount n={sessionTokens} />
                           </div>
                         </div>
                       </div>
@@ -506,7 +550,7 @@ export function Widget(): React.JSX.Element {
                   {/* Sessões recentes */}
                   <section>
                     <div className="mb-1.5 flex items-center gap-1">
-                      <Activity className="h-3.5 w-3.5 text-amber-300" />
+                      <Timer className="h-3.5 w-3.5 text-amber-300" />
                       <h4 className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                         Últimas sessões
                       </h4>
@@ -582,15 +626,4 @@ function SessionLine({
 
 function sumTokens(t: { input: number; output: number; reasoning: number; cacheRead: number; cacheWrite: number }): number {
   return t.input + t.output + t.reasoning + t.cacheRead + t.cacheWrite;
-}
-
-function periodLabel(p: string): string {
-  const labels: Record<string, string> = {
-    today: "Hoje",
-    "7d": "7d",
-    "30d": "30d",
-    month: "Mês",
-    all: "Tudo",
-  };
-  return labels[p] ?? p;
 }

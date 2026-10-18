@@ -156,15 +156,13 @@
      `backdrop-filter` não tenha o que desfocar (desktop). Mantém
      contraste alto sobre qualquer área de trabalho. */
   .glass-widget {
+    /* O backdrop-filter NÃO desfoca a área de trabalho numa janela
+       transparente do WebView2: ele só enxerga o próprio documento. Por
+       isso o fundo precisa ser praticamente opaco, senão os ícones da área
+       de trabalho aparecem por trás e o texto fica ilegível. */
     background:
-      linear-gradient(
-        135deg,
-        rgba(139, 92, 246, 0.22),
-        rgba(59, 130, 246, 0.12) 60%,
-        rgba(14, 14, 28, 0.88)
-      );
-    /* Fallback "sólido escuro" caso o gradiente não seja renderizado */
-    background-color: rgba(14, 14, 28, 0.88);
+      linear-gradient(135deg, rgba(139, 92, 246, 0.28), rgba(59, 130, 246, 0.10) 55%, transparent),
+      rgba(13, 13, 26, 0.97);
     border: 1px solid rgba(255, 255, 255, 0.1);
     backdrop-filter: blur(20px) saturate(160%);
     -webkit-backdrop-filter: blur(20px) saturate(160%);

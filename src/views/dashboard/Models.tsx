@@ -53,6 +53,7 @@ export function ModelsView({ snapshot, fmt }: Props): React.JSX.Element {
                 label: b.label,
                 value: b.aggregate.cost,
               }))}
+              fmt={fmt}
             />
           </div>
         </Card>

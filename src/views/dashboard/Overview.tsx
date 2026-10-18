@@ -36,9 +36,9 @@ type OverviewProps = {
 
 const TOOLTIPS = {
   realCost:
-    "Custo real: o que foi efetivamente cobrado por token pelos provedores. Modelos de assinatura (como o MiniMax Coding Plan) aparecem como R$ 0.",
+    "Custo real: o que foi efetivamente cobrado por token pelos provedores. Modelos de assinatura aparecem como R$ 0.",
   apiEquivalent:
-    "Custo equivalente na API: quanto custaria se você tivesse pago por token, mesmo em modelos de assinatura.",
+    "Custo equivalente na API: quanto custaria se você tivesse pagado por token, mesmo em modelos de assinatura.",
   savings:
     "Economia: diferença entre o custo do seu modelo de referência (configurado em Configurações) e o custo real que você pagou.",
   tokens:
@@ -48,6 +48,73 @@ const TOOLTIPS = {
   currentSession:
     "Sessão que está em andamento agora, com agente, modelo e custo até o momento.",
 };
+
+/**
+ * Diferença apiEquivalent − real, formatada em frase humana.
+ * - Positiva (assinatura poupou): "o MiniMax (assinatura) te poupou R$ X".
+ * - ≈ 0: "sem diferença entre assinatura e API".
+ * - Negativa: cai na frase neutra.
+ */
+function apiEquivalentSentence(
+  apiEquivalent: number,
+  real: number,
+  fmt: MoneyFmt,
+): React.ReactNode {
+  const diff = apiEquivalent - real;
+  if (!Number.isFinite(diff) || Math.abs(diff) < 0.005) {
+    return <>sem diferença entre custo real e o da API.</>;
+  }
+  if (diff > 0) {
+    return (
+      <>
+        o MiniMax (assinatura) te poupou{" "}
+        <Money usd={diff} fmt={fmt} size="xs" hideSecondary /> vs. se tivesse
+        pago por token.
+      </>
+    );
+  }
+  return (
+    <>
+      custo real ficou{" "}
+      <Money usd={Math.abs(diff)} fmt={fmt} size="xs" hideSecondary /> acima do
+      que a API cobrada por token.
+    </>
+  );
+}
+
+/** Diferença `referenceCost − cost` (modelo de referência vs. modelo real). */
+function savingsSentence(
+  reference: number,
+  real: number,
+  fmt: MoneyFmt,
+  referenceModel: string,
+): React.ReactNode {
+  const diff = reference - real;
+  if (!Number.isFinite(diff) || Math.abs(diff) < 0.005) {
+    return (
+      <>
+        se tudo rodasse em <span className="text-foreground">{referenceModel}</span>:
+        sem diferença.
+      </>
+    );
+  }
+  if (diff > 0) {
+    return (
+      <>
+        se tudo rodasse em{" "}
+        <span className="text-foreground">{referenceModel}</span>:{" "}
+        <Money usd={reference} fmt={fmt} size="xs" hideSecondary />.
+      </>
+    );
+  }
+  return (
+    <>
+      o modelo de referência (
+      <span className="text-foreground">{referenceModel}</span>) custaria{" "}
+      <Money usd={Math.abs(diff)} fmt={fmt} size="xs" hideSecondary /> a menos.
+    </>
+  );
+}
 
 export function Overview({
   snapshot,
@@ -66,6 +133,9 @@ export function Overview({
   const savings = Math.max(totals.referenceCost - totals.cost, 0);
   const monthlyLimit = settings.budgetMonthly ?? snapshot.budget.monthly ?? 0;
   const monthlyUsed = snapshot.projection.monthCost;
+  const dailyLimit = settings.budgetDaily ?? snapshot.budget.daily ?? 0;
+  const dailyLimitCurrency = settings.currency;
+  const dailyLimitUsd = convertToUsd(dailyLimit, dailyLimitCurrency, fmt);
 
   return (
     <div className="space-y-4">
@@ -103,14 +173,11 @@ export function Overview({
           }
           context={
             <span>
-              Se você tivesse pagado por token:{" "}
-              <Money
-                usd={totals.apiEquivalentCost - totals.cost}
-                fmt={fmt}
-                size="xs"
-                hideSecondary
-              />{" "}
-              a mais
+              {apiEquivalentSentence(
+                totals.apiEquivalentCost,
+                totals.cost,
+                fmt,
+              )}
             </span>
           }
         />
@@ -135,15 +202,12 @@ export function Overview({
             />
           }
           context={
-            <span>
-              Referência custaria{" "}
-              <Money
-                usd={totals.referenceCost}
-                fmt={fmt}
-                size="xs"
-                hideSecondary
-              />
-            </span>
+            savingsSentence(
+              totals.referenceCost,
+              totals.cost,
+              fmt,
+              settings.referenceModel,
+            )
           }
         />
         <KpiCard
@@ -153,10 +217,20 @@ export function Overview({
           accent="blue"
           value={<TokenCount n={totalTokensCount} className="text-2xl font-semibold" />}
           context={
-            <span className="flex flex-wrap gap-x-3 text-[11px]">
-              <span>in: <TokenCount n={totals.tokens.input} short /></span>
-              <span>out: <TokenCount n={totals.tokens.output} short /></span>
-              <span>raz.: <TokenCount n={totals.tokens.reasoning} short /></span>
+            <span className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px]">
+              {(
+                [
+                  ["entrada", totals.tokens.input],
+                  ["saída", totals.tokens.output],
+                  ["raciocínio", totals.tokens.reasoning],
+                  ["cache", totals.tokens.cacheRead + totals.tokens.cacheWrite],
+                ] as const
+              ).map(([label, n]) => (
+                <span key={label} className="flex items-baseline justify-between gap-2 whitespace-nowrap">
+                  <span className="text-muted-foreground">{label}</span>
+                  <TokenCount n={n} className="font-medium text-foreground/90" />
+                </span>
+              ))}
             </span>
           }
         />
@@ -273,6 +347,7 @@ export function Overview({
                 label: b.label,
                 value: b.aggregate.cost,
               }))}
+              fmt={fmt}
             />
           </div>
         </Card>
@@ -293,26 +368,31 @@ export function Overview({
             </div>
             <Separator className="my-3 bg-white/5" />
             <div className="text-[11px] text-muted-foreground">Orçamento diário</div>
-            <div className="mt-1 flex items-center justify-between gap-2 text-xs">
-              <span className="tabular">
-                <Money usd={today.cost} fmt={fmt} size="sm" hideSecondary />
-                {" / "}
-                {settings.budgetDaily !== undefined
-                  ? `${settings.currency} ${settings.budgetDaily.toFixed(2)}`
-                  : snapshot.budget.daily
-                    ? `${snapshot.budget.currency} ${snapshot.budget.daily.toFixed(2)}`
-                    : "—"}
-              </span>
-            </div>
-            <BudgetBar
-              className="mt-2"
-              value={today.cost}
-              limit={convertToUsd(
-                settings.budgetDaily ?? snapshot.budget.daily ?? 0,
-                settings.currency,
-                fmt,
-              )}
-            />
+            {dailyLimitUsd > 0 ? (
+              <>
+                <div className="mt-1 flex items-center justify-between gap-2 text-xs">
+                  <span className="tabular">
+                    <Money usd={today.cost} fmt={fmt} size="sm" hideSecondary />
+                  </span>
+                  <span className="tabular text-muted-foreground">
+                    / {dailyLimitCurrency} {dailyLimit.toFixed(2)}
+                  </span>
+                </div>
+                <BudgetBar className="mt-2" value={today.cost} limit={dailyLimitUsd} />
+              </>
+            ) : (
+              <a
+                href="#/settings"
+                onClick={(e) => {
+                  e.preventDefault();
+                  // Settings ficam no dashboard; o usuário clica pelo botão "Abrir dashboard" no widget.
+                  // Em vite dev, não há navegação — silenciosamente no-op.
+                }}
+                className="mt-1 inline-block text-[11px] text-violet-300 underline-offset-2 hover:underline"
+              >
+                definir orçamento diário →
+              </a>
+            )}
           </Card>
 
           <Card className="glass border-white/10 p-4">
@@ -327,7 +407,10 @@ export function Overview({
             {monthlyLimit > 0 ? (
               <>
                 <div className="mt-2">
-                  <BudgetBar value={monthlyUsed} limit={convertToUsd(monthlyLimit, settings.currency, fmt)} />
+                  <BudgetBar
+                    value={monthlyUsed}
+                    limit={convertToUsd(monthlyLimit, settings.currency, fmt)}
+                  />
                 </div>
                 <div className="mt-1 flex justify-between text-[11px] text-muted-foreground">
                   <span>
@@ -335,18 +418,16 @@ export function Overview({
                   </span>
                   <span>
                     restante{" "}
-                    {fmt.primary === "BRL"
-                      ? `R$ ${Math.max(
-                          convertToUsd(monthlyLimit, settings.currency, fmt) *
-                            (fmt.usdBrlRate ?? 1) -
-                            monthlyUsed * (fmt.usdBrlRate ?? 1),
-                          0,
-                        ).toFixed(2)}`
-                      : `$${Math.max(
-                          convertToUsd(monthlyLimit, settings.currency, fmt) -
-                            monthlyUsed,
-                          0,
-                        ).toFixed(2)}`}
+                    <Money
+                      usd={Math.max(
+                        convertToUsd(monthlyLimit, settings.currency, fmt) -
+                          monthlyUsed,
+                        0,
+                      )}
+                      fmt={fmt}
+                      size="xs"
+                      hideSecondary
+                    />
                   </span>
                 </div>
               </>
@@ -404,11 +485,14 @@ function CurrentSessionDetail({
         </div>
       </div>
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
-        <SmallStat label="Custo" value={<Money usd={session.aggregate.cost} fmt={fmt} size="sm" hideSecondary />} />
-        <SmallStat label="Tokens" value={<TokenCount n={total} short />} />
-        <SmallStat label="Entrada" value={<TokenCount n={t.input} short />} />
-        <SmallStat label="Saída" value={<TokenCount n={t.output} short />} />
-        <SmallStat label="Cache lido" value={<TokenCount n={t.cacheRead} short />} />
+        <SmallStat
+          label="Custo"
+          value={<Money usd={session.aggregate.cost} fmt={fmt} size="sm" hideSecondary />}
+        />
+        <SmallStat label="Tokens" value={<TokenCount n={total} />} />
+        <SmallStat label="Entrada" value={<TokenCount n={t.input} />} />
+        <SmallStat label="Saída" value={<TokenCount n={t.output} />} />
+        <SmallStat label="Cache lido" value={<TokenCount n={t.cacheRead} />} />
       </div>
     </div>
   );

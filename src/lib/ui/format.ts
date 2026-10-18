@@ -16,13 +16,21 @@ export type MoneyFmt = {
   rateUpdatedAt?: string;
 };
 
-const BR = new Intl.NumberFormat("pt-BR", {
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
 const BR_MANY = new Intl.NumberFormat("pt-BR", {
   maximumFractionDigits: 0,
 });
+
+/**
+ * Formata um número em pt-BR com N casas decimais (padrão 2).
+ * Útil para o sufixo "R$ ..." em linhas curtas (cotação, totais).
+ */
+export function formatBrlNumber(n: number, digits = 2): string {
+  if (!Number.isFinite(n)) return "0";
+  return n.toLocaleString("pt-BR", {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  });
+}
 
 function fmtUsd(value: number, digits: number): string {
   return value.toLocaleString("en-US", {
@@ -90,11 +98,8 @@ export function formatMoney(usd: number, opts: MoneyFmt, o: MoneyOpts = {}): Mon
 }
 
 function pickDigits(value: number): number {
-  const abs = Math.abs(value);
-  if (abs === 0) return 2;
-  if (abs < 1) return 4;
-  if (abs < 100) return 2;
-  return 0;
+  // Dinheiro sempre com 2 casas (R$ 1,14), exceto valores grandes.
+  return Math.abs(value) >= 10_000 ? 0 : 2;
 }
 
 // ---------- tokens ----------
@@ -103,28 +108,21 @@ const ONE_MILLION = 1_000_000;
 const ONE_THOUSAND = 1_000;
 
 /**
- * Formata uma quantidade de tokens em pt-BR:
- *   1.234.567 → "1,23 mi"
+ * Formata uma quantidade de tokens em pt-BR, sem zeros inúteis:
+ *   1.234.567 → "1,2 mi"
+ *   135.000.000 → "135 mi"
  *   345.000   → "345 mil"
  *   999       → "999"
  */
 export function formatTokens(n: number): string {
-  if (!Number.isFinite(n)) return "0";
-  const abs = Math.abs(n);
-  if (abs >= ONE_MILLION) {
-    const v = n / ONE_MILLION;
-    return `${v.toLocaleString("pt-BR", {
-      minimumFractionDigits: v < 10 ? 2 : v < 100 ? 1 : 0,
-      maximumFractionDigits: v < 10 ? 2 : v < 100 ? 1 : 0,
-    })} mi`;
-  }
-  if (abs >= ONE_THOUSAND) {
-    return `${BR.format(Math.round(n / ONE_THOUSAND))} mil`;
-  }
-  return BR_MANY.format(Math.round(n));
+  return formatTokensShort(n);
 }
 
-/** Versão curta, sem casas: 1.2 mi, 345 k, 999. */
+/**
+ * Versão curta: "1,2 mi", "563 mil", "999". Mantém consistência com a
+ * versão longa — sem "k" solto, no máximo 1 casa decimal em "mi",
+ * e zero casas em "mil".
+ */
 export function formatTokensShort(n: number): string {
   if (!Number.isFinite(n)) return "0";
   const abs = Math.abs(n);
@@ -136,7 +134,7 @@ export function formatTokensShort(n: number): string {
     })} mi`;
   }
   if (abs >= ONE_THOUSAND) {
-    return `${BR.format(Math.round(n / ONE_THOUSAND))} k`;
+    return `${BR_MANY.format(Math.round(n / ONE_THOUSAND))} mil`;
   }
   return BR_MANY.format(Math.round(n));
 }
