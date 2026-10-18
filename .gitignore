@@ -1,4 +1,4 @@
-# ---- Python ----
+# ---- Python (legacy) ----
 __pycache__/
 *.py[cod]
 *$py.class
@@ -60,3 +60,15 @@ id_ed25519*
 credentials*
 secrets.*
 service-account*.json
+
+# ---- Node / Tauri / Vite ----
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/Cargo.lock
+src-tauri/gen/schemas/
+src-tauri/WixTools/
+src-tauri/.cargo/
+
+# ---- Misc ----
+app-icon.png
