@@ -34,8 +34,11 @@ import {
 import {
   buildBreakdowns,
   buildDaily,
+  addAggregate,
   buildSessionTree,
   emptyAggregate,
+  priceFor,
+  totalAggregate,
   filterRowsByPeriod,
   normalizeDir,
   rowToAggRow,
@@ -73,6 +76,13 @@ function num(v: unknown, fallback = 0): Num {
 
 function str(v: unknown, fallback = ""): string {
   return typeof v === "string" ? v : fallback;
+}
+
+/** "YYYY-MM-DD" (dia local vindo do SQLite) → epoch ms da meia-noite local. */
+export function localDayToMs(day: string): number | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
+  if (!m) return null;
+  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getTime();
 }
 
 function asRows(r: DbRow[]): Array<Record<string, unknown>> {
@@ -143,6 +153,7 @@ export class RealDataSource implements DataSource {
     fetchedAt: 0,
   };
   private lastPeriod: PeriodKey | null = null;
+  private referenceModel: string = DEFAULT_SETTINGS.referenceModel;
 
   async getSnapshot(period: PeriodKey): Promise<Snapshot> {
     if (this.lastPeriod !== period) {
@@ -163,6 +174,11 @@ export class RealDataSource implements DataSource {
       console.warn("[RealDataSource] loadSettings falhou:", e);
       return { ...DEFAULT_SETTINGS };
     });
+    if (settings.referenceModel !== this.referenceModel) {
+      // Os custos das sessões dependem do modelo de referência: refaz o cache.
+      this.referenceModel = settings.referenceModel;
+      this.currentSessionCache.fetchedAt = 0;
+    }
 
     // 3) Verifica se o banco existe.
     let dbExists = true;
@@ -253,11 +269,8 @@ export class RealDataSource implements DataSource {
     const byAgent: Breakdown[] = breakdowns.byAgent;
     const byProject: Breakdown[] = breakdowns.byProject;
 
-    let totalsAgg = sumAggregates(filtered.map((r) => toAggAggregate(r)));
-    totalsAgg.sessions = countDistinctSessions(filtered);
-
-    let todayAgg = sumAggregates(rowsForToday(combinedRows).map((r) => toAggAggregate(r)));
-    todayAgg.sessions = countDistinctSessions(rowsForToday(combinedRows));
+    const totalsAgg = totalAggregate(filtered, models, referenceModel);
+    const todayAgg = totalAggregate(rowsForToday(combinedRows), models, referenceModel);
 
     // 10) agentsConfig + opencodeRunning
     let agentsConfig: AgentConfig[] = [];
@@ -370,16 +383,17 @@ export class RealDataSource implements DataSource {
     return extractAgentsConfig(agents, config);
   }
 
-  /** Query do período SEM o dia de hoje (para cache). */
-  private async queryPeriod(period: PeriodKey, includeToday: boolean): Promise<AggRow[]> {
-    const startMs = periodStartMs(period);
-    const todayStartMs = todayStart().getTime();
-    const rows = await dbQuery(PERIOD_AGG_SQL);
+  /**
+   * Linhas agregadas (dia × provider × modelo × agente × diretório × sessão)
+   * com mensagens a partir de `sinceMs` (inclusive). O filtro vai para o SQL,
+   * então o tick de "hoje" só lê as mensagens de hoje.
+   */
+  private async queryAggRows(sinceMs: number, untilMs = Number.MAX_SAFE_INTEGER): Promise<AggRow[]> {
+    const rows = await dbQuery(PERIOD_AGG_SQL, [Math.floor(sinceMs), Math.floor(untilMs)]);
     const out: AggRow[] = [];
     for (const r of asRows(rows)) {
-      const dayMs = num(r["day_ms"]);
-      if (startMs !== null && dayMs < startMs) continue;
-      if (!includeToday && dayMs >= todayStartMs) continue;
+      const dayMs = localDayToMs(str(r["day"]));
+      if (dayMs === null) continue;
       const sessionId = str(r["session_id"]);
       out.push(
         rowToAggRow(
@@ -406,79 +420,34 @@ export class RealDataSource implements DataSource {
     return out;
   }
 
-  private async queryToday(): Promise<AggRow[]> {
+  /** Histórico do período SEM o dia de hoje (vai para o cache). */
+  private async queryPeriod(period: PeriodKey, includeToday: boolean): Promise<AggRow[]> {
+    const startMs = periodStartMs(period) ?? 0;
     const todayStartMs = todayStart().getTime();
-    const rows = await dbQuery(PERIOD_AGG_SQL);
-    const out: AggRow[] = [];
-    for (const r of asRows(rows)) {
-      const dayMs = num(r["day_ms"]);
-      if (dayMs < todayStartMs) continue;
-      const sessionId = str(r["session_id"]);
-      out.push(
-        rowToAggRow(
-          {
-            dayMs,
-            providerId: str(r["provider_id"]),
-            modelId: str(r["model_id"]),
-            agent: str(r["agent"]),
-            directory: str(r["directory"]),
-            cost: num(r["cost"]),
-            tokens: {
-              input: num(r["tokens_input"]),
-              output: num(r["tokens_output"]),
-              reasoning: num(r["tokens_reasoning"]),
-              cacheRead: num(r["tokens_cache_read"]),
-              cacheWrite: num(r["tokens_cache_write"]),
-            },
-            messages: num(r["messages"]),
-          },
-          () => sessionId,
-        ),
-      );
-    }
-    return out;
+    return includeToday
+      ? this.queryAggRows(startMs)
+      : startMs >= todayStartMs
+        ? []
+        : this.queryAggRows(startMs, todayStartMs);
+  }
+
+  /** Só o dia de hoje (reconsultado a cada tick). */
+  private async queryToday(): Promise<AggRow[]> {
+    return this.queryAggRows(todayStart().getTime());
   }
 
   private rowsForCurrentMonthCache: { rows: AggRow[]; fetchedAt: number } | null = null;
   private async rowsForCurrentMonth(): Promise<AggRow[]> {
     if (
       this.rowsForCurrentMonthCache &&
-      Date.now() - this.rowsForCurrentMonthCache.fetchedAt < HISTORY_TTL_MS
+      Date.now() - this.rowsForCurrentMonthCache.fetchedAt < SESSION_TTL_MS * 6
     ) {
       return this.rowsForCurrentMonthCache.rows;
     }
     const start = new Date();
     start.setDate(1);
     start.setHours(0, 0, 0, 0);
-    const startMs = start.getTime();
-    const rows = await dbQuery(PERIOD_AGG_SQL);
-    const out: AggRow[] = [];
-    for (const r of asRows(rows)) {
-      const dayMs = num(r["day_ms"]);
-      if (dayMs < startMs) continue;
-      const sessionId = str(r["session_id"]);
-      out.push(
-        rowToAggRow(
-          {
-            dayMs,
-            providerId: str(r["provider_id"]),
-            modelId: str(r["model_id"]),
-            agent: str(r["agent"]),
-            directory: str(r["directory"]),
-            cost: num(r["cost"]),
-            tokens: {
-              input: num(r["tokens_input"]),
-              output: num(r["tokens_output"]),
-              reasoning: num(r["tokens_reasoning"]),
-              cacheRead: num(r["tokens_cache_read"]),
-              cacheWrite: num(r["tokens_cache_write"]),
-            },
-            messages: num(r["messages"]),
-          },
-          () => sessionId,
-        ),
-      );
-    }
+    const out = await this.queryAggRows(start.getTime());
     this.rowsForCurrentMonthCache = { rows: out, fetchedAt: Date.now() };
     return out;
   }
@@ -516,6 +485,10 @@ export class RealDataSource implements DataSource {
     for (const s of sessions) s.selfAggregate = aggMap.get(s.id) ?? emptyAggregate();
 
     const tree = buildSessionTree(sessions);
+    // Mantém a ordem "última atividade primeiro" vinda do BEST_ROOT_SQL:
+    // roots[0] é a sessão atual.
+    const order = new Map(rootIds.map((id, i) => [id, i]));
+    tree.roots.sort((a, b) => (order.get(a.id) ?? 1e9) - (order.get(b.id) ?? 1e9));
     this.currentSessionCache = { tree, fetchedAt: now };
     return tree;
   }
@@ -530,22 +503,29 @@ export class RealDataSource implements DataSource {
       const placeholders = chunk.map(() => "?").join(",");
       const sql = SESSION_SELF_AGG_SQL_TEMPLATE(placeholders);
       const rows = await dbQuery(sql, chunk);
+      const models = this.models.get();
+      const referenceModel = this.referenceModel;
+      // Uma linha por (sessão, provider, modelo): precificamos cada uma e somamos.
       for (const r of asRows(rows)) {
         const id = str(r["session_id"]);
-        out.set(id, {
+        const tokens = {
+          input: num(r["tokens_input"]),
+          output: num(r["tokens_output"]),
+          reasoning: num(r["tokens_reasoning"]),
+          cacheRead: num(r["tokens_cache_read"]),
+          cacheWrite: num(r["tokens_cache_write"]),
+        };
+        const price = priceFor(models, referenceModel, str(r["provider_id"]), str(r["model_id"]), tokens);
+        const part: Aggregate = {
           cost: num(r["cost"]),
-          apiEquivalentCost: 0, // preenchido depois
-          referenceCost: 0, // preenchido depois
-          tokens: {
-            input: num(r["tokens_input"]),
-            output: num(r["tokens_output"]),
-            reasoning: num(r["tokens_reasoning"]),
-            cacheRead: num(r["tokens_cache_read"]),
-            cacheWrite: num(r["tokens_cache_write"]),
-          },
+          apiEquivalentCost: price.api,
+          referenceCost: price.ref,
+          tokens,
           messages: num(r["messages"]),
           sessions: 1,
-        });
+        };
+        const prev = out.get(id);
+        out.set(id, prev ? { ...addAggregate(prev, part), sessions: 1 } : part);
       }
     }
     return out;
@@ -573,12 +553,6 @@ function toAggAggregate(r: AggRow): Aggregate {
     messages: r.messages,
     sessions: r.sessions.size,
   };
-}
-
-function countDistinctSessions(rows: AggRow[]): number {
-  const s = new Set<string>();
-  for (const r of rows) for (const id of r.sessions) s.add(id);
-  return s.size;
 }
 
 function pickCurrentSessionRoot(
@@ -650,7 +624,6 @@ function parseModelColumn(raw: unknown): { providerId: string; modelId: string }
 const PERIOD_AGG_SQL = `
 SELECT
   date(m.time_created/1000, 'unixepoch', 'localtime') AS day,
-  CAST((date(m.time_created/1000, 'unixepoch', 'localtime') || ' 00:00:00') AS INTEGER) AS day_ms,
   json_extract(m.data, '$.providerID') AS provider_id,
   json_extract(m.data, '$.modelID') AS model_id,
   json_extract(m.data, '$.agent') AS agent,
@@ -665,27 +638,34 @@ SELECT
   COUNT(*) AS messages
 FROM message m
 JOIN session s ON s.id = m.session_id
-WHERE json_extract(m.data, '$.role') = 'assistant'
+WHERE m.time_created >= ?1 AND m.time_created < ?2
+  AND json_extract(m.data, '$.role') = 'assistant'
 GROUP BY day, provider_id, model_id, agent, directory, m.session_id
 `;
 
 /**
- * 1) Identifica as raízes (parent_id IS NULL, não-arquivadas) cuja subárvore
- *    tem o maior `time_updated` (considerando descendentes). Empates: todos.
+ * 1) Raízes (parent_id IS NULL, não arquivadas) ordenadas pela última
+ *    atividade da subárvore inteira (a raiz ou qualquer descendente).
+ *    A primeira é a "sessão atual". O CTE carrega o id do NÓ (`id`) além da
+ *    raiz: descer por `s.parent_id = t.id` termina quando acabam os filhos.
+ *    (A versão antiga descia por `parent_id = root_id` e entrava em loop
+ *    infinito, porque os mesmos filhos eram reencontrados a cada iteração.)
  */
 const BEST_ROOT_SQL = `
-WITH RECURSIVE
-descendants(root_id, time_updated) AS (
-    SELECT id AS root_id, time_updated
+WITH RECURSIVE tree(root_id, id, time_updated, depth) AS (
+    SELECT id, id, time_updated, 0
       FROM session
       WHERE parent_id IS NULL AND COALESCE(time_archived, 0) = 0
     UNION ALL
-    SELECT d.root_id, s.time_updated
-      FROM session s JOIN descendants d ON s.parent_id = d.root_id
+    SELECT t.root_id, s.id, s.time_updated, t.depth + 1
+      FROM session s JOIN tree t ON s.parent_id = t.id
+      WHERE t.depth < 50
 )
 SELECT root_id, MAX(time_updated) AS last_upd
-  FROM descendants GROUP BY root_id
-HAVING last_upd = (SELECT MAX(last_upd) FROM (SELECT MAX(time_updated) AS last_upd FROM descendants GROUP BY root_id))
+  FROM tree
+ GROUP BY root_id
+ ORDER BY last_upd DESC
+ LIMIT 300
 `;
 
 /**
@@ -695,10 +675,11 @@ function SESSION_TREE_SQL_PARAM(n: number): string {
   if (n === 0) return "SELECT * FROM session WHERE 1=0";
   const placeholders = Array.from({ length: n }, () => "?").join(",");
   return `
-WITH RECURSIVE walk(id) AS (
-    SELECT id FROM session WHERE id IN (${placeholders})
+WITH RECURSIVE walk(id, depth) AS (
+    SELECT id, 0 FROM session WHERE id IN (${placeholders})
     UNION ALL
-    SELECT s.id FROM session s JOIN walk w ON s.parent_id = w.id
+    SELECT s.id, w.depth + 1 FROM session s JOIN walk w ON s.parent_id = w.id
+     WHERE w.depth < 50
 )
 SELECT s.* FROM session s WHERE s.id IN (SELECT id FROM walk) ORDER BY s.time_created
 `;
@@ -708,6 +689,8 @@ function SESSION_SELF_AGG_SQL_TEMPLATE(placeholders: string): string {
   return `
 SELECT
   m.session_id,
+  json_extract(m.data, '$.providerID') AS provider_id,
+  json_extract(m.data, '$.modelID') AS model_id,
   SUM(COALESCE(json_extract(m.data, '$.cost'), 0)) AS cost,
   SUM(COALESCE(json_extract(m.data, '$.tokens.input'), 0)) AS tokens_input,
   SUM(COALESCE(json_extract(m.data, '$.tokens.output'), 0)) AS tokens_output,
@@ -718,7 +701,7 @@ SELECT
 FROM message m
 WHERE json_extract(m.data, '$.role') = 'assistant'
   AND m.session_id IN (${placeholders})
-GROUP BY m.session_id
+GROUP BY m.session_id, provider_id, model_id
 `;
 }
 

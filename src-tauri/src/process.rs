@@ -1,85 +1,88 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
-use sysinfo::{ProcessesToUpdate, System};
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
-/// Janela de "atividade recente" para considerar o opencode como
-/// trabalhando agora, mesmo que o processo exato tenha saído da lista.
-const RECENT_ACTIVITY_WINDOW_SECS: u64 = 120;
+/// Processo iniciado há menos disso conta como "recente".
+const RECENT_SECS: u64 = 120;
+/// A listagem de processos custa caro; reaproveitamos o resultado por um tempo.
+const CACHE_TTL: Duration = Duration::from_secs(5);
 
-/// Resultado da checagem: indica se o opencode está rodando e/ou
-/// teve atividade há pouco tempo (mensagens recentes).
 #[derive(Debug, Clone, Default)]
 pub struct OpencodeStatus {
-    /// `true` se há pelo menos um processo cujo nome começa com "opencode"
-    /// (case-insensitive), excluindo "opencode-hud*".
+    /// Há pelo menos um processo cujo nome começa com "opencode" (exceto o HUD).
     pub process_running: bool,
-    /// `true` se o opencode teve "atividade" (algum processo bateu os critérios
-    /// acima) nos últimos `RECENT_ACTIVITY_WINDOW_SECS` segundos.
+    /// Algum desses processos foi iniciado há menos de `RECENT_SECS`.
     pub recent_activity: bool,
-    /// PID do(s) processo(s) aberto(s), útil para diagnóstico.
-    pub pids: Vec<u32>,
 }
 
-const RECENT_ACTIVITY_SECS: u64 = RECENT_ACTIVITY_WINDOW_SECS;
+struct Cache {
+    sys: System,
+    at: Option<Instant>,
+    last: OpencodeStatus,
+}
 
-/// Procura processos cujo nome começa com "opencode" (case-insensitive),
-/// ignorando o próprio "opencode-hud" e suas variantes. Devolve o status
-/// consolidado.
+static CACHE: Mutex<Option<Cache>> = Mutex::new(None);
+
+/// Status do opencode, com cache de `CACHE_TTL`. Só atualiza a lista de
+/// processos (nome + tempo de execução), nunca discos/rede/sensores.
 pub fn opencode_status() -> OpencodeStatus {
-    let mut sys = System::new_all();
-    sys.refresh_processes(ProcessesToUpdate::All, true);
+    let mut guard = match CACHE.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let cache = guard.get_or_insert_with(|| Cache {
+        sys: System::new(),
+        at: None,
+        last: OpencodeStatus::default(),
+    });
 
-    let _now_secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-
-    let mut running = false;
-    let mut recent = false;
-    let mut pids: Vec<u32> = Vec::new();
-
-    for (pid, p) in sys.processes() {
-        if matches_opencode(p) {
-            let pid_num = pid.as_u32();
-            pids.push(pid_num);
-            running = true;
-
-            // sysinfo::Process::run_time() devolve em segundos (quando
-            // `refresh_processes` é chamado com `true`, segundo a doc).
-            let run_time = p.run_time();
-            // Considera "recente" se o processo foi iniciado há menos de
-            // RECENT_ACTIVITY_SECS. Combinando com start_time (epoch) seria
-            // mais preciso, mas run_time já basta.
-            recent = recent || run_time <= RECENT_ACTIVITY_SECS;
+    if let Some(at) = cache.at {
+        if at.elapsed() < CACHE_TTL {
+            return cache.last.clone();
         }
     }
 
-    OpencodeStatus {
-        process_running: running,
-        recent_activity: running && recent,
-        pids,
+    cache.sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::new().with_exe(UpdateKind::Never),
+    );
+
+    let mut status = OpencodeStatus::default();
+    for p in cache.sys.processes().values() {
+        if matches_opencode(&p.name().to_string_lossy()) {
+            status.process_running = true;
+            if p.run_time() <= RECENT_SECS {
+                status.recent_activity = true;
+            }
+        }
     }
+    cache.at = Some(Instant::now());
+    cache.last = status.clone();
+    status
 }
 
-/// Wrapper booleano compat com a API anterior.
-pub fn opencode_running() -> bool {
-    opencode_status().process_running
-}
-
-fn matches_opencode(p: &sysinfo::Process) -> bool {
-    // O opencode CLI (npm) roda como "opencode.exe". Também pode aparecer
-    // como filhos node com "opencode" em cmd line. Aqui olhamos o nome do
-    // executável.
-    let name = p.name().to_string_lossy().to_ascii_lowercase();
-    let trimmed = name.trim_end_matches(".exe");
-
-    // Ignora o próprio HUD e variantes.
-    if trimmed == "opencode-hud" || trimmed.starts_with("opencode-hud-") {
+/// Nome do executável começa com "opencode" (sem diferenciar maiúsculas),
+/// excluindo o próprio HUD.
+fn matches_opencode(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let trimmed = lower.trim_end_matches(".exe");
+    if trimmed.starts_with("opencode-hud") {
         return false;
     }
-    // Aceita qualquer coisa que COMECE com "opencode".
-    if trimmed.starts_with("opencode") {
-        return true;
+    trimmed.starts_with("opencode")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::matches_opencode;
+
+    #[test]
+    fn matches_names() {
+        assert!(matches_opencode("opencode.exe"));
+        assert!(matches_opencode("OpenCode.EXE"));
+        assert!(!matches_opencode("opencode-hud.exe"));
+        assert!(!matches_opencode("node.exe"));
     }
-    false
 }

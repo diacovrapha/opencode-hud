@@ -3,6 +3,8 @@ use serde_json::{Map, Number, Value};
 
 use crate::paths::db_path;
 
+pub(crate) const QUERY_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+
 fn validate_select(sql: &str) -> Result<(), String> {
     let trimmed = sql.trim_start();
     let lower = trimmed.to_ascii_lowercase();
@@ -36,6 +38,11 @@ pub fn run_query(sql: &str, params: &[Value]) -> Result<Vec<Map<String, Value>>,
 
     conn.busy_timeout(std::time::Duration::from_millis(5000))
         .map_err(|e| format!("busy_timeout: {e}"))?;
+
+    // Trava de segurança: nenhuma consulta pode rodar mais que QUERY_LIMIT.
+    // (Uma CTE recursiva errada já prendeu uma thread para sempre.)
+    let started = std::time::Instant::now();
+    conn.progress_handler(10_000, Some(move || started.elapsed() > QUERY_LIMIT));
 
     let mut stmt = conn
         .prepare(sql)
@@ -143,5 +150,20 @@ mod tests {
         let n = rows.first().and_then(|r| r.get("n")).cloned().unwrap_or(Value::Null);
         eprintln!("session count = {n}");
         assert!(matches!(n, Value::Number(_)));
+    }
+
+    #[test]
+    fn runaway_query_is_interrupted() {
+        if !db_path().exists() {
+            return;
+        }
+        // CTE infinita: precisa ser interrompida pela trava de tempo.
+        let t = std::time::Instant::now();
+        let r = run_query(
+            "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT count(*) FROM c",
+            &[],
+        );
+        assert!(r.is_err());
+        assert!(t.elapsed() < QUERY_LIMIT + std::time::Duration::from_secs(3));
     }
 }

@@ -428,6 +428,47 @@ function blankDay(): {
 
 // ----- Helpers para Snapshot -----
 
+/**
+ * Soma as linhas em um único Aggregate JÁ PRECIFICADO (custo equivalente na
+ * API e custo no modelo de referência), com sessões distintas. Use para
+ * `totals` e `today`: somar Aggregates "crus" deixava esses campos em zero.
+ */
+export function totalAggregate(rows: AggRow[], models: ModelIndex, referenceModel: string): Aggregate {
+  const refLookup = lookupRef(models, referenceModel);
+  const acc = emptyAggregate();
+  const sessionIds = new Set<string>();
+  for (const r of rows) {
+    const lookup = findPrice(models, r.providerId, r.modelId);
+    acc.cost += r.cost;
+    acc.apiEquivalentCost += lookup.via === "missing" ? 0 : priceTokens(lookup.entry.cost, r.tokens);
+    acc.referenceCost += priceWithLookup(refLookup, r.tokens);
+    acc.tokens.input += r.tokens.input;
+    acc.tokens.output += r.tokens.output;
+    acc.tokens.reasoning += r.tokens.reasoning;
+    acc.tokens.cacheRead += r.tokens.cacheRead;
+    acc.tokens.cacheWrite += r.tokens.cacheWrite;
+    acc.messages += r.messages;
+    for (const sid of r.sessions) sessionIds.add(sid);
+  }
+  acc.sessions = sessionIds.size;
+  return acc;
+}
+
+/** Custo equivalente na API e no modelo de referência de um conjunto de tokens. */
+export function priceFor(
+  models: ModelIndex,
+  referenceModel: string,
+  providerId: string,
+  modelId: string,
+  tokens: TokenSet,
+): { api: number; ref: number } {
+  const lookup = findPrice(models, providerId, modelId);
+  return {
+    api: lookup.via === "missing" ? 0 : priceTokens(lookup.entry.cost, tokens),
+    ref: priceWithLookup(lookupRef(models, referenceModel), tokens),
+  };
+}
+
 /** Soma uma lista de Aggregate (útil para `totals` e `today`). */
 export function sumAggregates(items: Iterable<Aggregate>): Aggregate {
   const acc = emptyAggregate();

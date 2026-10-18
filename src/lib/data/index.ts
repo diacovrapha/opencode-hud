@@ -14,6 +14,16 @@ const activeSource: DataSource = inTauri ? new RealDataSource() : new MockDataSo
 
 export const dataSource = activeSource;
 
+// Gancho de diagnóstico: permite inspecionar o app rodando via DevTools/CDP
+// (ex.: `await window.__hud.dataSource.getSnapshot("today")`).
+if (typeof window !== "undefined") {
+  (window as unknown as { __hud?: unknown }).__hud = {
+    dataSource: activeSource,
+    loadSettings: () => import("./settings").then((m) => m.loadSettings()),
+    fetchUsdBrl: () => import("./usdbrl").then((m) => m.fetchUsdBrl()),
+  };
+}
+
 type SnapshotState = {
   period: PeriodKey;
   snapshot: Snapshot | null;
