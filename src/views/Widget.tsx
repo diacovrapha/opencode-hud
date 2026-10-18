@@ -11,7 +11,6 @@ import {
   Layers,
   Sparkles,
   Timer,
-  Settings as SettingsIcon,
 } from "lucide-react";
 import {
   useSnapshotStore,
@@ -19,7 +18,6 @@ import {
   stopPolling,
 } from "@/lib/data";
 import { useSettings, runBudgetWatcher } from "@/lib/ui/settings-bridge";
-import { getNeedsOnboarding } from "@/lib/ui/v2-bridge";
 import { opencodeRunning } from "@/lib/data/api";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
@@ -307,24 +305,6 @@ export function Widget(): React.JSX.Element {
                 <span>{snapshot?.today.sessions ?? 0} sessões</span>
               </div>
             </div>
-
-            {/* Banner de onboarding — só aparece se o dashboard não foi configurado ainda */}
-            {getNeedsOnboarding(snapshot) && (
-              <button
-                type="button"
-                data-tauri-drag-region
-                onClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  void onOpenDashboard();
-                }}
-                className="glass-button mt-0.5 inline-flex items-center gap-1.5 self-start rounded-md px-2 py-1 text-[10px] text-violet-200 hover:text-foreground"
-                title="Configurar provedores e moeda"
-              >
-                <SettingsIcon className="h-3 w-3" />
-                configure seus provedores →
-              </button>
-            )}
 
             {/* Orçamento diário */}
             {dailyLimit > 0 ? (

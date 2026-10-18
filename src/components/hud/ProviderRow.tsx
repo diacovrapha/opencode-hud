@@ -47,7 +47,7 @@ type Props = {
   settings: Settings;
   update: (p: Partial<Settings>) => Promise<void>;
   fmt: MoneyFmt;
-  /** Esconde o badge "inferred" (ex.: quando o onboarding já confirmou). */
+  /** Esconde o badge "inferred" (ex.: após o usuário já ter confirmado). */
   showInferredBadge?: boolean;
 };
 
@@ -56,8 +56,8 @@ type Props = {
  * modelos usados, último uso e uso do mês, além do controle de billing
  * ("Como você paga").
  *
- * É reaproveitada na aba de Configurações e no passo 2 do Onboarding — não
- * embute nenhum conhecimento da rota onde está sendo usada.
+ * É reaproveitada na aba de Configurações — não embute nenhum conhecimento
+ * da rota onde está sendo usada.
  */
 export function ProviderRow({
   provider,

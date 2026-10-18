@@ -197,8 +197,6 @@ export type Snapshot = {
   subscriptions?: SubscriptionsSummary;
   /** v2: modelo de referência efetivo. */
   reference?: ResolvedReference;
-  /** v2: true enquanto o usuário não concluiu a tela de boas-vindas. */
-  needsOnboarding?: boolean;
   /** Mensagem amigável quando não foi possível gerar dados (ex.: db ausente). */
   error?: string;
 };
@@ -218,8 +216,6 @@ export type Settings = {
   providers: Record<string, ProviderSetting>;
   /** v2: preços manuais por modelo (chave = "provider/model"). */
   customPrices: Record<string, CustomPrice>;
-  /** v2: a tela de boas-vindas já foi concluída? */
-  onboardingDone: boolean;
   refreshSeconds: number;
   autostart: boolean;
   widgetExpanded: boolean;
@@ -231,7 +227,6 @@ export const DEFAULT_SETTINGS: Settings = {
   referenceMode: "auto",
   providers: {},
   customPrices: {},
-  onboardingDone: false,
   refreshSeconds: 5,
   autostart: true,
   widgetExpanded: false,

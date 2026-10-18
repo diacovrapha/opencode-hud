@@ -503,7 +503,7 @@ export class MockDataSource implements DataSource {
         | "subagent",
     }));
 
-    // ---- v2: provedores, assinaturas, referência, onboarding ----
+    // ---- v2: provedores, assinaturas, referência ----
     const usdBrlRate = 5.32;
     const providers = buildMockProviders(all, filtered, agentsConfig, usdBrlRate);
     const subscriptions = buildMockSubscriptions(providers);
@@ -528,7 +528,6 @@ export class MockDataSource implements DataSource {
       providers,
       subscriptions,
       reference,
-      needsOnboarding: false,
     };
   }
 }

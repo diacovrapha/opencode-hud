@@ -9,8 +9,8 @@
 // A partir da v2, `providers` e `customPrices` são objetos.Record<string, ...>
 // e DEVEM ser mesclados campo a campo no `update` — do contrário, um patch
 // com `{ providers: { anthropic: ... } }` apagaria os outros provedores
-// que já estavam salvos. As helpers (`setProviderSetting`, `setCustomPrice`,
-// `completeOnboarding`) encapsulam essa regra.
+// que já estavam salvos. As helpers (`setProviderSetting`, `setCustomPrice`)
+// encapsulam essa regra.
 
 import { create } from "zustand";
 import {
@@ -38,7 +38,6 @@ const SETTINGS_KEYS = [
   "referenceMode",
   "providers",
   "customPrices",
-  "onboardingDone",
   "refreshSeconds",
   "autostart",
   "widgetExpanded",
@@ -173,17 +172,6 @@ export async function setCustomPrice(
     nextPrices[key] = price;
   }
   const next: Settings = { ...cur, customPrices: nextPrices };
-  useSettings.setState({ settings: next });
-  await saveSettings(next);
-}
-
-/**
- * Marca a tela de boas-vindas como concluída. Idempotente.
- */
-export async function completeOnboarding(): Promise<void> {
-  const cur = useSettings.getState().settings;
-  if (cur.onboardingDone) return;
-  const next: Settings = { ...cur, onboardingDone: true };
   useSettings.setState({ settings: next });
   await saveSettings(next);
 }

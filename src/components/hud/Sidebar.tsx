@@ -125,7 +125,7 @@ export function Sidebar({ active, onChange }: SidebarProps): React.JSX.Element {
         ) : (
           <div className="flex items-center gap-2">
             <CalendarRange className="h-3.5 w-3.5 opacity-60" />
-            <span>v0.2.0</span>
+            <span>v{__APP_VERSION__}</span>
           </div>
         )}
       </div>

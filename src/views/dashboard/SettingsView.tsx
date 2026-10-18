@@ -285,7 +285,7 @@ export function SettingsView({
         </div>
         <div className="text-xs text-muted-foreground">
           <div>
-            Versão: <span className="tabular text-foreground">0.2.0</span>
+            Versão: <span className="tabular text-foreground">{__APP_VERSION__}</span>
           </div>
           <div className="mt-1">
             Repositório:{" "}

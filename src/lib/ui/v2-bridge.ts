@@ -1,7 +1,7 @@
 /**
  * Bridge v2: adapta a camada `src/lib/data` ao que esta tarefa precisa, mesmo
  * enquanto a outra tarefa ainda está implementando provedores/assinaturas/
- * referência/catálogo/onboarding.
+ * referência/catálogo.
  *
  * Estratégia:
  *   - Tudo que esta tarefa consome da camada de dados é lido daqui, NÃO
@@ -11,8 +11,8 @@
  *     `@/lib/data`) é acessada via cast tolerante. Quando ela ainda não
  *     existe, devolvemos array vazio.
  *   - Para os campos opcionais do `Snapshot` (`providers`, `subscriptions`,
- *     `reference`, `needsOnboarding`), tratamos a ausência com fallbacks
- *     seguros — listas vazias, null, false — em vez de quebrar.
+ *     `reference`), tratamos a ausência com fallbacks seguros — listas vazias
+ *     ou null — em vez de quebrar.
  *
  * Esta bridge é APENAS para a UI — a outra tarefa pode mexer em
  * `src/lib/data/**` sem nos coordenar, contanto que mantenha o contrato
@@ -75,12 +75,6 @@ export function getReference(
   snapshot: Snapshot | null | undefined,
 ): ResolvedReference | null {
   return snapshot?.reference ?? null;
-}
-
-export function getNeedsOnboarding(
-  snapshot: Snapshot | null | undefined,
-): boolean {
-  return Boolean(snapshot?.needsOnboarding);
 }
 
 /** Soma das mensalidades conhecidas (em USD). */

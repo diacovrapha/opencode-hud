@@ -3,7 +3,6 @@ import {
   loadSettings,
   setProviderSetting,
   setCustomPrice,
-  completeOnboarding,
   useSettings,
 } from "@/lib/data/settings";
 import { DEFAULT_SETTINGS, type Settings } from "@/lib/data/types";
@@ -26,7 +25,6 @@ describe("settings — merge e helpers", () => {
     const s = await loadSettings();
     expect(s.providers).toEqual({});
     expect(s.customPrices).toEqual({});
-    expect(s.onboardingDone).toBe(false);
     expect(s.referenceMode).toBe("auto");
   });
 
@@ -107,16 +105,8 @@ describe("settings — merge e helpers", () => {
     expect(useSettings.getState().settings.customPrices["anthropic/claude-sonnet-5-5"]).toEqual({ input: 1, output: 2 });
   });
 
-  it("completeOnboarding é idempotente e seta onboardingDone = true", async () => {
-    expect(useSettings.getState().settings.onboardingDone).toBe(false);
-    await completeOnboarding();
-    expect(useSettings.getState().settings.onboardingDone).toBe(true);
-    await completeOnboarding();
-    expect(useSettings.getState().settings.onboardingDone).toBe(true);
-  });
-
   it("settings antigos salvos sem os campos novos são preenchidos com defaults", async () => {
-    // Simulamos um objeto legacy salvo: providers/customPrices/onboardingDone ausentes.
+    // Simulamos um objeto legacy salvo: providers/customPrices ausentes.
     const legacy: Partial<Settings> = {
       currency: "USD",
       referenceModel: "openai/gpt-4o",
@@ -128,10 +118,9 @@ describe("settings — merge e helpers", () => {
         ...DEFAULT_SETTINGS,
         currency: "USD",
         referenceModel: "openai/gpt-4o",
-        // providers, customPrices e onboardingDone intencionalmente vazios
+        // providers e customPrices intencionalmente vazios
         providers: {},
         customPrices: {},
-        onboardingDone: false,
       },
       hydrated: true,
     });
@@ -139,7 +128,6 @@ describe("settings — merge e helpers", () => {
     const s = useSettings.getState().settings;
     expect(s.providers).toEqual({});
     expect(s.customPrices).toEqual({});
-    expect(s.onboardingDone).toBe(false);
     expect(s.currency).toBe("USD");
     expect(s.referenceMode).toBe("auto"); // mesmo ausente no legacy → default
     expect(s.referenceModel).toBe("openai/gpt-4o");

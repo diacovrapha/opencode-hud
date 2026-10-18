@@ -386,7 +386,6 @@ export class RealDataSource implements DataSource {
       providers,
       subscriptions,
       reference,
-      needsOnboarding: !settings.onboardingDone,
     };
   }
 
@@ -426,7 +425,6 @@ export class RealDataSource implements DataSource {
         mode: settings.referenceMode,
         priceMissing: true,
       },
-      needsOnboarding: !settings.onboardingDone,
       error,
     };
   }
