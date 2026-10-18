@@ -35,6 +35,18 @@ export async function opencodeRunning(): Promise<boolean> {
   return invoke<boolean>("opencode_running");
 }
 
+/** Status estruturado: combina `running` (processo detectado) e `recent`
+ *  (houve atividade nos últimos ~2 min). A UI pode mostrar "parado" só
+ *  quando ambos forem falsos. */
+export type OpencodeStatus = {
+  running: boolean;
+  recent: boolean;
+};
+
+export async function opencodeStatus(): Promise<OpencodeStatus> {
+  return invoke<OpencodeStatus>("opencode_status_cmd");
+}
+
 /** Retorna metadados sobre o banco do opencode. */
 export type DbPathInfo = {
   path: string;

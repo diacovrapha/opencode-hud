@@ -29,14 +29,15 @@
         "url": "index.html?view=widget#/widget",
         "width": 340,
         "height": 120,
+        "minWidth": 340,
+        "minHeight": 120,
         "decorations": false,
         "transparent": true,
+        "shadow": false,
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "resizable": false,
-        "visible": true,
-        "x": 100,
-        "y": 100
+        "visible": true
       }
     ],
     "security": {

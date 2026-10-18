@@ -26,6 +26,10 @@ export type Breakdown = {
   key: string;
   label: string;
   aggregate: Aggregate;
+  /** Quando o preço do modelo/grupo não pôde ser calculado, marca `true`. */
+  priceMissing?: boolean;
+  /** Caminho (ou label extra) usado para agrupar por projeto. */
+  path?: string;
 };
 
 export type DailyPoint = {
@@ -87,6 +91,8 @@ export type Snapshot = {
   agentsConfig: AgentConfig[];
   budget: Budget;
   projection: Projection;
+  /** Mensagem amigável quando não foi possível gerar dados (ex.: db ausente). */
+  error?: string;
 };
 
 export type Settings = {

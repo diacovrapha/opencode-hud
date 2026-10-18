@@ -42,25 +42,159 @@ fn ensure_dashboard(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Garante que a janela dashboard comece **escondida**. O `tauri.conf.json`
+/// já marca `visible: false`, mas o plugin `window-state` (em versões
+/// mais agressivas) ou flags restauradas podem torná-la visível. Esta
+/// função é um cinto-e-suspensórios.
+fn hide_dashboard_if_visible(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window(WIN_DASHBOARD) {
+        if let Ok(true) = win.is_visible() {
+            let _ = win.hide();
+        }
+    }
+}
+
 fn ensure_widget(app: &AppHandle) -> tauri::Result<()> {
     if app.get_webview_window(WIN_WIDGET).is_some() {
         return Ok(());
     }
     let url = WebviewUrl::App("index.html?view=widget#/widget".into());
-    WebviewWindowBuilder::new(app, WIN_WIDGET, url)
+
+    // O widget é construído sem posição fixa e depois posicionado a partir
+    // do monitor principal (via window após o build). Definir a posição
+    // ANTES do build é frágil porque `window-state` pode sobrescrever.
+    let window = WebviewWindowBuilder::new(app, WIN_WIDGET, url)
         .title("opencode HUD widget")
         .inner_size(340.0, 120.0)
         .min_inner_size(340.0, 120.0)
         .max_inner_size(1200.0, 720.0)
         .decorations(false)
         .transparent(true)
+        .shadow(false)
         .always_on_top(true)
         .skip_taskbar(true)
         .visible(true)
         .resizable(false)
-        .position(100.0, 100.0)
         .build()?;
+
+    // Posiciona no canto superior direito do monitor principal (com fallback).
+    place_widget_top_right(&window);
+    // Reaplica a posição após um pequeno delay, garantindo que sobreviva a
+    // plugins como window-state que restauram estado após o build.
+    let w2 = window.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        place_widget_top_right(&w2);
+        ensure_widget_within_monitors(&w2);
+    });
     Ok(())
+}
+
+/// Posiciona `window` no canto superior direito do monitor principal.
+/// Devolve silenciosamente em caso de erro. Usa coordenadas lógicas
+/// (DIPs) porque `Monitor::position()` e `Monitor::size()` devolvem DIPs.
+fn place_widget_top_right(window: &tauri::WebviewWindow) {
+    let primary = window
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| {
+            window
+                .available_monitors()
+                .ok()
+                .and_then(|m| m.into_iter().next())
+        });
+    let Some(m) = primary else { return; };
+    let usable = m.work_area();
+    let mw = usable.size.width as f64;
+    let mh = usable.size.height as f64;
+    if mw <= 0.0 || mh <= 0.0 {
+        return;
+    }
+    let margin = 16.0;
+    let ww = 340.0;
+    let _wh = 120.0;
+    let x = (usable.position.x as f64) + (mw - ww - margin).max(0.0);
+    let y = (usable.position.y as f64) + margin;
+    eprintln!(
+        "[widget] monitor pos=({},{}) size=({},{}) work=({},{} {}x{}) -> widget at ({},{})",
+        m.position().x, m.position().y, m.size().width, m.size().height,
+        usable.position.x, usable.position.y, usable.size.width, usable.size.height,
+        x, y,
+    );
+    let _ = window.set_position(tauri::LogicalPosition::new(x, y));
+}
+
+/// Devolve a posição (x, y) — canto superior direito do monitor principal
+/// considerando DPI e área de trabalho (sem cobrir a barra de tarefas).
+/// (Mantida por compat — não está sendo usada; o posicionamento real é
+/// feito por `place_widget_top_right` depois do build.)
+#[allow(dead_code)]
+fn primary_top_right_for(app: &AppHandle, width: f64, height: f64, margin: f64) -> (f64, f64) {
+    let primary = app
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| app.available_monitors().ok().and_then(|m| m.into_iter().next()));
+    if let Some(m) = primary {
+        // `monitor.position()` está em DIPs — `Monitor::size()` igual.
+        // O position final do canto superior direito é:
+        //   x = posição_x_monitor + largura_monitor - widget_width - margem
+        //   y = posição_y_monitor + margem (mas respeitando usable_area)
+        let usable = m.work_area();
+        // Fallback se work_area for degenerado (raro):
+        let (target_w, target_h) = if usable.size.width > 0 && usable.size.height > 0 {
+            (usable.size.width as f64, usable.size.height as f64)
+        } else {
+            (m.size().width as f64, m.size().height as f64)
+        };
+        let _ = (target_h, height); // evitarmos warning; só usamos width p/ canto direito
+        let x = (usable.position.x as f64) + (target_w - width - margin).max(0.0);
+        let y = (usable.position.y as f64) + margin;
+        return (x, y);
+    }
+    // Sem informação: cai num canto seguro em 1920x1080.
+    (1920.0 - width - margin, margin)
+}
+
+/// Se a posição atual da janela não cair dentro de nenhum monitor,
+/// reposiciona-a no canto superior direito do monitor principal.
+/// Usa unidades lógicas (DIPs).
+fn ensure_widget_within_monitors(window: &tauri::WebviewWindow) {
+    let Ok(monitors) = window.available_monitors() else { return };
+    if monitors.is_empty() {
+        return;
+    }
+    let Ok(current_pos) = window.outer_position() else { return };
+    let Ok(current_size) = window.outer_size() else { return };
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let cw = (current_pos.x as f64) / scale;
+    let ch = (current_pos.y as f64) / scale;
+    let cw_w = (current_size.width as f64) / scale;
+    let ch_h = (current_size.height as f64) / scale;
+
+    let inside_any = monitors.iter().any(|m| {
+        let p = m.position();
+        let s = m.size();
+        cw + cw_w > p.x as f64
+            && cw < p.x as f64 + s.width as f64
+            && ch + ch_h > p.y as f64
+            && ch < p.y as f64 + s.height as f64
+    });
+    if inside_any {
+        return;
+    }
+
+    // Fallback: canto superior direito do monitor principal.
+    if let Ok(Some(primary)) = window.primary_monitor() {
+        let usable = primary.work_area();
+        let w = primary.size().width as f64;
+        let margin = 16.0;
+        let x = (usable.position.x as f64) + (w - cw_w - margin).max(0.0);
+        let y = (usable.position.y as f64) + margin;
+        let _ = ch_h; // referência mantida (não usamos — o widget tem tamanho fixo)
+        let _ = window.set_position(tauri::LogicalPosition::new(x, y));
+    }
 }
 
 fn show_hide_window(app: &AppHandle, label: &str) {
@@ -206,7 +340,11 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_store::Builder::new().build())
-        .plugin(tauri_plugin_window_state::Builder::new().build())
+        .plugin(tauri_plugin_window_state::Builder::new().with_state_flags(
+            // Não restaurar visibilidade/maximized (a app decide isso).
+            // Restaurar só tamanho e posição.
+            tauri_plugin_window_state::StateFlags::POSITION | tauri_plugin_window_state::StateFlags::SIZE,
+        ).build())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_opener::init())
         .setup({
@@ -215,6 +353,9 @@ pub fn run() {
                 if let Err(e) = ensure_dashboard(&app.handle()) {
                     eprintln!("ensure_dashboard (setup): {e}");
                 }
+                // Garantia adicional: força o estado "escondido" para a dashboard
+                // mesmo que flags restauradas (window-state ou outras) a tornem visível.
+                hide_dashboard_if_visible(&app.handle());
                 if let Err(e) = ensure_widget(&app.handle()) {
                     eprintln!("ensure_widget (setup): {e}");
                 }
@@ -235,9 +376,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::db_query,
-            commands::read_opencode_file_cmd,
-            commands::opencode_running_cmd,
-            commands::db_path_info_cmd,
+            commands::read_opencode_file,
+            commands::opencode_running,
+            commands::opencode_status_cmd,
+            commands::db_path_info,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

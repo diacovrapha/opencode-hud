@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Minus, Square, X } from "lucide-react";
+import { Minus, Square, X as CloseIcon, Sparkles } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -9,34 +9,80 @@ type TitleBarProps = {
   className?: string;
 };
 
+/** Helper: devolve a janela atual do Tauri só quando rodando dentro do Tauri. */
+function tryGetCurrentWindow(): ReturnType<typeof getCurrentWindow> | null {
+  if (typeof window === "undefined") return null;
+  if (!("__TAURI_INTERNALS__" in window)) return null;
+  try {
+    return getCurrentWindow();
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Barra de título customizada: substitui as decorações nativas.
- * Usa `data-tauri-drag-region` para que a área central seja arrastável.
+ * - Área central é arrastável (`data-tauri-drag-region`).
+ * - Botões à direita: minimizar, maximizar, fechar.
  */
 export function TitleBar({ title = "opencode HUD", className }: TitleBarProps): React.JSX.Element {
-  const win = getCurrentWindow();
+  // NÃO chamamos `getCurrentWindow()` durante o render — isso quebra a página
+  // fora do Tauri (vite dev). Em vez disso, capturamos a instância lazy,
+  // uma vez, e checamos se estamos no Tauri.
+  const winRef = React.useRef<ReturnType<typeof getCurrentWindow> | null>(null);
+  if (winRef.current === null) {
+    winRef.current = tryGetCurrentWindow();
+  }
 
   async function toggleMaximize(): Promise<void> {
-    const isMax = await win.isMaximized();
-    await (isMax ? win.unmaximize() : win.maximize());
+    const win = winRef.current;
+    if (!win) return;
+    try {
+      const isMax = await win.isMaximized();
+      await (isMax ? win.unmaximize() : win.maximize());
+    } catch (e) {
+      console.warn("toggleMaximize:", e);
+    }
+  }
+
+  async function minimize(): Promise<void> {
+    const win = winRef.current;
+    if (!win) return;
+    try {
+      await win.minimize();
+    } catch (e) {
+      console.warn("minimize:", e);
+    }
+  }
+
+  async function closeWindow(): Promise<void> {
+    const win = winRef.current;
+    if (!win) return;
+    try {
+      await win.hide();
+    } catch (e) {
+      console.warn("hide:", e);
+    }
   }
 
   return (
     <div
       data-tauri-drag-region
       className={cn(
-        "titlebar flex h-9 w-full select-none items-center justify-between bg-background/80 px-3 backdrop-blur",
+        "titlebar flex h-10 w-full select-none items-center justify-between border-b border-white/5 bg-black/30 px-3 backdrop-blur",
         className,
       )}
     >
       <div
         data-tauri-drag-region
-        className="flex h-full flex-1 items-center gap-2 text-sm text-muted-foreground"
+        className="flex h-full flex-1 items-center gap-2 text-sm text-foreground/90"
       >
         <span
           aria-hidden
-          className="inline-block h-2.5 w-2.5 rounded-full bg-gradient-to-br from-violet-500 to-sky-500"
-        />
+          className="inline-flex h-6 w-6 items-center justify-center rounded-md bg-gradient-to-br from-violet-500 to-blue-500 shadow"
+        >
+          <Sparkles className="h-3.5 w-3.5 text-white" />
+        </span>
         <span data-tauri-drag-region className="font-medium tracking-tight">
           {title}
         </span>
@@ -45,16 +91,16 @@ export function TitleBar({ title = "opencode HUD", className }: TitleBarProps): 
         <Button
           variant="ghost"
           size="icon"
-          className="h-7 w-7"
+          className="h-7 w-7 text-muted-foreground hover:bg-white/5 hover:text-foreground"
           aria-label="Minimizar"
-          onClick={() => void win.minimize()}
+          onClick={() => void minimize()}
         >
           <Minus className="h-3.5 w-3.5" />
         </Button>
         <Button
           variant="ghost"
           size="icon"
-          className="h-7 w-7"
+          className="h-7 w-7 text-muted-foreground hover:bg-white/5 hover:text-foreground"
           aria-label="Maximizar"
           onClick={() => void toggleMaximize()}
         >
@@ -63,11 +109,11 @@ export function TitleBar({ title = "opencode HUD", className }: TitleBarProps): 
         <Button
           variant="ghost"
           size="icon"
-          className="h-7 w-7 hover:bg-destructive hover:text-destructive-foreground"
+          className="h-7 w-7 text-muted-foreground hover:bg-red-500/20 hover:text-red-300"
           aria-label="Fechar"
-          onClick={() => void win.hide()}
+          onClick={() => void closeWindow()}
         >
-          <X className="h-3.5 w-3.5" />
+          <CloseIcon className="h-3.5 w-3.5" />
         </Button>
       </div>
     </div>
