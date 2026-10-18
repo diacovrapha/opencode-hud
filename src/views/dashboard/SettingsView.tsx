@@ -137,7 +137,7 @@ export function SettingsView({ settings, update }: Props): React.JSX.Element {
           <MetricTooltip content="Modelo usado como referência para calcular quanto você teria gasto na API. A economia é a diferença entre esse custo e o custo real." />
         </div>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <Field label="Modelo de referência" hint="Sugeridos abaixo; clicar aplica o valor.">
+          <Field label="Modelo de referência" hint="Usado para calcular quanto custaria se tudo rodasse nesse modelo.">
             <Select
               value={knownRef ? knownRef.value : "__custom__"}
               onValueChange={(v) => {

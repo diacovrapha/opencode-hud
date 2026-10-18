@@ -8,7 +8,10 @@ const Card = React.forwardRef<
   <div
     ref={ref}
     className={cn(
-      "rounded-lg border bg-card text-card-foreground shadow-sm",
+      // Sem bg-card: o fundo vem das classes de vidro (.glass, .glass-raised)
+      // passadas por quem usa. Com o @theme do Tailwind v4, bg-card virava um
+      // cinza sólido por cima do vidro e apagava o tom violeta.
+      "rounded-lg border text-card-foreground",
       className,
     )}
     {...props}

@@ -1,4 +1,4 @@
-# ---- Python (legacy) ----
+# ---- Python (scripts de apoio, ex.: export_fixture.py) ----
 __pycache__/
 *.py[cod]
 *$py.class
